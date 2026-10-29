@@ -33,7 +33,8 @@ sealed class Baza
             zmodyfikowano INTEGER NOT NULL,
             data_zdjecia TEXT NULL,
             grupy TEXT NOT NULL DEFAULT '',
-            przetworzono TEXT NOT NULL);
+            przetworzono TEXT NOT NULL,
+            wykrywanie TEXT NULL);
         CREATE INDEX IF NOT EXISTS ix_zdjecia_katalog ON zdjecia(katalog);
         CREATE TABLE IF NOT EXISTS twarze(
             id INTEGER PRIMARY KEY,
@@ -75,6 +76,9 @@ sealed class Baza
         Wykonaj(c, "PRAGMA journal_mode=WAL;");
         Wykonaj(c, Schemat);
         UsunWektoryZDysku(c);
+        // v0.1: brak informacji, z jakimi ustawieniami wykryto twarze — NULL oznacza „wykryj na nowo przy najbliższym Przetwórz”
+        if (!Lista(c, "SELECT name FROM pragma_table_info('zdjecia')", r => r.GetString(0)).Contains("wykrywanie"))
+            Wykonaj(c, "ALTER TABLE zdjecia ADD COLUMN wykrywanie TEXT NULL");
     }
 
     /// <summary>

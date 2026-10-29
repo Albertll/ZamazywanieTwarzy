@@ -83,9 +83,21 @@ sealed class Silnik : IDisposable
             if (_ustawienia is not null) return _ustawienia;
             using var c = _baza.Otworz();
             var json = Baza.Skalar(c, "SELECT wartosc FROM ustawienia WHERE klucz='ustawienia'") as string;
-            return _ustawienia = json is null ? new Ustawienia() : JsonSerializer.Deserialize<Ustawienia>(json, Json) ?? new Ustawienia();
+            var u = json is null ? new Ustawienia() : JsonSerializer.Deserialize<Ustawienia>(json, Json) ?? new Ustawienia();
+            if (u.Wersja < Ustawienia.BiezacaWersja)
+            {
+                // v0.1 zapisywało domyślny próg 0,6 — to nie był wybór użytkownika, więc przechodzi na nowy domyślny
+                if (Math.Abs(u.ProgWykrywania - 0.6) < 1e-9) u.ProgWykrywania = 0.5;
+                u.Wersja = Ustawienia.BiezacaWersja;
+                ZapiszWBazie(c, u);
+            }
+            return _ustawienia = u;
         }
     }
+
+    static void ZapiszWBazie(SqliteConnection c, Ustawienia u) =>
+        Baza.Wykonaj(c, "INSERT INTO ustawienia(klucz, wartosc) VALUES('ustawienia', @w) ON CONFLICT(klucz) DO UPDATE SET wartosc=excluded.wartosc",
+            ("@w", JsonSerializer.Serialize(u, Json)));
 
     public void ZapiszUstawienia(Ustawienia u)
     {
@@ -100,9 +112,9 @@ sealed class Silnik : IDisposable
         if (zmianaTrybu && Zadanie is { Trwa: true })
             throw new BladUzytkownika("Poczekaj na koniec bieżącego zadania, zanim zmienisz tryb.");
 
+        u.Wersja = Ustawienia.BiezacaWersja;
         using var c = _baza.Otworz();
-        Baza.Wykonaj(c, "INSERT INTO ustawienia(klucz, wartosc) VALUES('ustawienia', @w) ON CONFLICT(klucz) DO UPDATE SET wartosc=excluded.wartosc",
-            ("@w", JsonSerializer.Serialize(u, Json)));
+        ZapiszWBazie(c, u);
         _ustawienia = u;
         if (!zmianaTrybu) return;
         if (u.RozpoznawanieWlaczone) PrzygotujPamiec();
@@ -215,15 +227,23 @@ sealed class Silnik : IDisposable
         var info = new FileInfo(plik);
         long zmod = info.LastWriteTimeUtc.Ticks;
         using var c = _baza.Otworz();
-        var istniejace = Baza.Lista(c, "SELECT id, rozmiar, zmodyfikowano FROM zdjecia WHERE sciezka=@s",
-            r => new[] { r.GetInt64(0), r.GetInt64(1), r.GetInt64(2) }, ("@s", plik)).FirstOrDefault();
-        if (istniejace is not null && istniejace[1] == info.Length && istniejace[2] == zmod)
+        var istniejace = Baza.Lista(c, "SELECT id, rozmiar, zmodyfikowano, wykrywanie FROM zdjecia WHERE sciezka=@s",
+            r => (Id: r.GetInt64(0), Rozmiar: r.GetInt64(1), Zmod: r.GetInt64(2), Wykrywanie: Baza.Tekst(r, 3)), ("@s", plik)).FirstOrDefault();
+        bool tenSamPlik = istniejace.Id != 0 && istniejace.Rozmiar == info.Length && istniejace.Zmod == zmod;
+        if (tenSamPlik && istniejace.Wykrywanie == u.KluczWykrywania)
         {
             // bez zmian — tylko nowy wybór grup, które mają być na zdjęciu (i ewentualnie brakujące wycinki do rozpoznawania)
-            Baza.Wykonaj(c, "UPDATE zdjecia SET grupy=@g WHERE id=@id", ("@g", grupy), ("@id", istniejace[0]));
-            if (u.RozpoznawanieWlaczone) UzupelnijWycinki(c, istniejace[0], plik);
+            Baza.Wykonaj(c, "UPDATE zdjecia SET grupy=@g WHERE id=@id", ("@g", grupy), ("@id", istniejace.Id));
+            if (u.RozpoznawanieWlaczone) UzupelnijWycinki(c, istniejace.Id, plik);
             return;
         }
+        // Ten sam plik, ale inne ustawienia wykrywania: twarze wykrywa się na nowo, a decyzje operatora przechodzą
+        // na nowe ramki w tym samym miejscu. Ramki dorysowane ręcznie zostają bez zmian.
+        var decyzje = tenSamPlik ? Baza.Lista(c, """
+            SELECT id, x, y, w, h FROM twarze
+            WHERE zdjecie_id=@z AND reczna=0 AND (osoba_reczna IS NOT NULL OR nie_twarz=1 OR wymus=1)
+            """, r => (Id: r.GetInt64(0), Ramka: new Wykrycie(r.GetFloat(1), r.GetFloat(2), r.GetFloat(3), r.GetFloat(4), 0, [])),
+            ("@z", istniejace.Id)) : [];
 
         using var bmp = Obraz.Wczytaj(plik);
         var wykrycia = _detektor.Wykryj(bmp, (float)u.ProgWykrywania, u.MaleTwarze);
@@ -239,39 +259,70 @@ sealed class Silnik : IDisposable
             miniatura = Obraz.Koduj(m, jakosc: 80);
         var data = Exif.DataZrobienia(plik) ?? info.LastWriteTime;
 
-        long id = istniejace?[0] ?? 0;
+        // nowa ramka (indeks) ← stara twarz z decyzją; każda stara trafia najwyżej do jednej nowej (najlepsze pokrycie)
+        var przeniesienia = new Dictionary<int, long>();
+        foreach (var (i, d, iou) in twarze.SelectMany((t, i) => decyzje.Select(d => (i, d, Iou: PokrycieRamek(t.W, d.Ramka))))
+                     .Where(x => x.Iou > 0.5f).OrderByDescending(x => x.Iou))
+            if (!przeniesienia.ContainsKey(i) && !przeniesienia.ContainsValue(d.Id)) przeniesienia[i] = d.Id;
+        // decyzja bez odpowiednika w nowym wykryciu zostaje ze starą ramką — żadna decyzja nie przepada po cichu
+        var zostaja = decyzje.Select(d => d.Id).Except(przeniesienia.Values).ToList();
+
+        long id = istniejace.Id;
         var noweCechy = new List<(long Id, float[] Cechy)>();
         Baza.Transakcja(c, () =>
         {
             (string, object?)[] pola =
             [
                 ("@s", plik), ("@k", Path.GetDirectoryName(plik)), ("@w", bmp.Width), ("@h", bmp.Height), ("@r", info.Length),
-                ("@m", zmod), ("@d", Baza.Iso(data)), ("@g", grupy), ("@p", Baza.Iso(DateTime.Now)), ("@id", id),
+                ("@m", zmod), ("@d", Baza.Iso(data)), ("@g", grupy), ("@p", Baza.Iso(DateTime.Now)), ("@wk", u.KluczWykrywania), ("@id", id),
             ];
+            var stare = new List<long>();
             if (id != 0)
             {
-                ZapomnijTwarze(c, "zdjecie_id=@id", ("@id", id));
-                Baza.Wykonaj(c, "DELETE FROM twarze WHERE zdjecie_id=@id", ("@id", id));
-                Baza.Wykonaj(c, "UPDATE zdjecia SET szerokosc=@w, wysokosc=@h, rozmiar=@r, zmodyfikowano=@m, data_zdjecia=@d, grupy=@g, przetworzono=@p WHERE id=@id", pola);
+                var bezZostajacych = zostaja.Count == 0 ? "" : $" AND id NOT IN ({string.Join(",", zostaja)})";
+                // ramek dorysowanych ręcznie nie ruszamy przy ponownym wykrywaniu tego samego pliku
+                stare = Baza.Lista(c, $"SELECT id FROM twarze WHERE zdjecie_id=@id{(tenSamPlik ? " AND reczna=0" + bezZostajacych : "")}",
+                    r => r.GetInt64(0), ("@id", id));
+                Baza.Wykonaj(c, "UPDATE zdjecia SET szerokosc=@w, wysokosc=@h, rozmiar=@r, zmodyfikowano=@m, data_zdjecia=@d, grupy=@g, przetworzono=@p, wykrywanie=@wk WHERE id=@id", pola);
             }
             else
             {
-                Baza.Wykonaj(c, "INSERT INTO zdjecia(sciezka, katalog, szerokosc, wysokosc, rozmiar, zmodyfikowano, data_zdjecia, grupy, przetworzono) VALUES(@s, @k, @w, @h, @r, @m, @d, @g, @p)", pola);
+                Baza.Wykonaj(c, "INSERT INTO zdjecia(sciezka, katalog, szerokosc, wysokosc, rozmiar, zmodyfikowano, data_zdjecia, grupy, przetworzono, wykrywanie) VALUES(@s, @k, @w, @h, @r, @m, @d, @g, @p, @wk)", pola);
                 id = Baza.OstatnieId(c);
             }
-            foreach (var t in twarze)
+            for (int i = 0; i < twarze.Count; i++)
             {
+                var t = twarze[i];
                 Baza.Wykonaj(c, "INSERT INTO twarze(zdjecie_id, x, y, w, h, pewnosc, punkty, wyrownana, miniatura) VALUES(@z, @x, @y, @w, @h, @p, @pk, @wy, @m)",
                     ("@z", id), ("@x", t.W.X), ("@y", t.W.Y), ("@w", t.W.W), ("@h", t.W.H), ("@p", t.W.Pewnosc),
                     ("@pk", string.Join(";", t.W.Punkty.Select(v => v.ToString("0.#", CultureInfo.InvariantCulture)))),
                     ("@wy", t.Wycinek), ("@m", t.Mini));
-                if (t.Cechy is not null) noweCechy.Add((Baza.OstatnieId(c), t.Cechy));
+                long nowe = Baza.OstatnieId(c);
+                if (t.Cechy is not null) noweCechy.Add((nowe, t.Cechy));
+                if (przeniesienia.TryGetValue(i, out var stara))
+                {
+                    Baza.Wykonaj(c, """
+                        UPDATE twarze SET (osoba_reczna, nie_twarz, wymus) = (SELECT osoba_reczna, nie_twarz, wymus FROM twarze WHERE id=@s)
+                        WHERE id=@n
+                        """, ("@s", stara), ("@n", nowe));
+                    // wzorzec powstały z tej twarzy ma własny wycinek — przepinamy tylko powiązanie
+                    Baza.Wykonaj(c, "UPDATE wzorce SET twarz_id=@n WHERE twarz_id=@s", ("@s", stara), ("@n", nowe));
+                }
             }
+            foreach (var s in stare) _cechyTwarzy.TryRemove(s, out _);
+            if (stare.Count > 0) Baza.Wykonaj(c, $"DELETE FROM twarze WHERE id IN ({string.Join(",", stare)})");
         });
         // do pamięci dopiero po zatwierdzeniu — wycofana transakcja nie zostawi wektora pod cudzym id
         foreach (var (nid, cechy) in noweCechy) _cechyTwarzy[nid] = cechy;
         File.WriteAllBytes(SciezkaMiniatury(id), miniatura);
         File.Delete(SciezkaPodgladu(id));
+    }
+
+    static float PokrycieRamek(Wykrycie a, Wykrycie b)
+    {
+        float ix = Math.Max(0, Math.Min(a.X + a.W, b.X + b.W) - Math.Max(a.X, b.X));
+        float iy = Math.Max(0, Math.Min(a.Y + a.H, b.Y + b.H) - Math.Max(a.Y, b.Y));
+        return ix * iy / (a.Pole + b.Pole - ix * iy);
     }
 
     /// <summary>

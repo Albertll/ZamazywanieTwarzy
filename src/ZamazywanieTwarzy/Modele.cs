@@ -37,7 +37,8 @@ sealed class Ustawienia
     /// <summary>Zielone tylko, gdy twarz pasuje do co najmniej dwóch wzorców osoby (jeśli osoba ma ich ≥ 2).</summary>
     public bool DwaWzorce { get; set; } = true;
 
-    public double ProgWykrywania { get; set; } = 0.6;
+    /// <summary>Do v0.1 było 0,6 — na zdjęciach testowych przepuszczało wyraźne twarze (porównanie: proba/porownanie).</summary>
+    public double ProgWykrywania { get; set; } = 0.5;
     public bool MaleTwarze { get; set; } = true;
 
     /// <summary>Na ile „komórek” w poziomie rozbić zamazywaną twarz — mniej = mocniej.</summary>
@@ -45,6 +46,15 @@ sealed class Ustawienia
 
     /// <summary>Po ilu miesiącach ostrzegać, że najnowszy wzorzec osoby jest stary (twarze dzieci szybko się zmieniają).</summary>
     public int MiesiaceWzorca { get; set; } = 12;
+
+    /// <summary>Wersja zapisanych ustawień — pozwala raz poprawić starą wartość domyślną, nie ruszając wyboru użytkownika.</summary>
+    public int Wersja { get; set; }
+
+    public const int BiezacaWersja = 2;
+
+    /// <summary>Ustawienia wykrywania, z którymi przetworzono zdjęcie — po ich zmianie twarze wykrywa się na nowo.</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public string KluczWykrywania => string.Create(System.Globalization.CultureInfo.InvariantCulture, $"{ProgWykrywania:0.###};{(MaleTwarze ? 1 : 0)}");
 }
 
 sealed class OsobaInfo

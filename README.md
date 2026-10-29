@@ -189,7 +189,13 @@ modele spoza programu w `proba\modele-porownanie`). Wyniki z 29.10.2026 — szcz
   ale też pominął dwie twarze, które YuNet znalazł, i jest ok. 4,5× wolniejszy.
 - **Obniżenie progu YuNet z 0,6 do 0,5** (bez zmiany modelu): +40 ramek, wśród nich kilka wyraźnych twarzy, które przy 0,6
   zostałyby odsłonięte (m.in. twarz en face 51 px), kilkanaście rozmytych twarzy z tłumu i ok. 20 fałszywych ramek
-  (nieszkodliwych — kończą się zbędnym zamazaniem).
+  (nieszkodliwych — kończą się zbędnym zamazaniem). **Od v0.2 domyślny próg to 0,5.** Instalacja z zapisanym starym
+  domyślnym 0,6 przechodzi na 0,5 sama; wartość ustawioną świadomie w v0.2 program zostawia.
+
+Zmiana czułości wykrywania działa także dla przetworzonych już zdjęć: program pamięta, z jakimi ustawieniami wykrył
+twarze, i przy „Przetwórz zdjęcia” wykrywa je na nowo, przenosząc decyzje operatora (przypisania, „to nie twarz”,
+„zamazuj zawsze”) na ramki w tym samym miejscu. Decyzja bez odpowiednika w nowym wykryciu zostaje ze starą ramką,
+a ramki dorysowane ręcznie nie są ruszane.
 
 Zbiór jest mały (dorośli, zdjęcia z mediów), więc wyniki są orientacyjne. AuraFace (Apache 2.0, wytrenowany na danych
 dopuszczonych komercyjnie) narzędzie dołączy samo, gdy plik `glintr100.onnx` z

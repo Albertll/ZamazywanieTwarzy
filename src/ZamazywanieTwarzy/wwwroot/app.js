@@ -830,8 +830,8 @@ const USTAWIENIA = [
   ['progRozpoznania', 'Próg rozpoznania', 'Od tej wartości twarz uznaje się za daną osobę (osoba bez zgody → czerwona; ze zgodą, ale poniżej progu „zielonego” → żółta z podpowiedzią). Zalecane dla modelu SFace: 0,363.', 0.01, true],
   ['margines', 'Wymagana przewaga nad drugą osobą', 'Jeśli dwie osoby z bazy są podobne (rodzeństwo), zielone tylko przy takiej przewadze najlepszej nad drugą.', 0.01, true],
   ['dwaWzorce', 'Zgodność z dwoma wzorcami', 'Zielone tylko, gdy twarz pasuje do co najmniej dwóch wzorców osoby (gdy osoba ma ich ≥ 2).', null, true],
-  ['progWykrywania', 'Czułość wykrywania twarzy', 'Pewność, od której coś uznaje się za twarz. Niżej = mniej przeoczonych twarzy, ale więcej fałszywych ramek. Działa przy ponownym przetworzeniu.', 0.05, false],
-  ['maleTwarze', 'Szukaj małych twarzy w tle', 'Dodatkowe przejście w wysokiej rozdzielczości — wolniej, ale mniej przeoczeń na zdjęciach grupowych.', null, false],
+  ['progWykrywania', 'Czułość wykrywania twarzy', 'Pewność, od której coś uznaje się za twarz (domyślnie 0,5). Niżej = mniej przeoczonych twarzy, ale więcej fałszywych ramek (nieszkodliwych — kończą się zbędnym zamazaniem). Po zmianie kliknij „Przetwórz zdjęcia”: program wykryje twarze na nowo i przeniesie Twoje decyzje na ramki w tym samym miejscu.', 0.05, false],
+  ['maleTwarze', 'Szukaj małych twarzy w tle', 'Dodatkowe przejście w wysokiej rozdzielczości — wolniej, ale mniej przeoczeń na zdjęciach grupowych. Po zmianie — jak wyżej, „Przetwórz zdjęcia”.', null, false],
   ['silaZamazania', 'Siła zamazania', 'Na ile pól w poziomie rozbić twarz przed rozmyciem. Mniej = mocniej (3–16).', 1, false],
   ['miesiaceWzorca', 'Wiek wzorców (miesiące)', 'Po tylu miesiącach od najnowszego zdjęcia wzorcowego osoba dostaje ostrzeżenie „stare wzorce”.', 1, true],
 ];
