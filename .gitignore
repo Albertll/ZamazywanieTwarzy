@@ -1,0 +1,17 @@
+# build
+bin/
+obj/
+.vs/
+*.user
+publikacja/
+
+# dane programu — baza osób i wzorców twarzy (dane biometryczne), nigdy do repozytorium
+dane/
+dane-*/
+
+# zdjęcia testowe (pobiera testdane/pobierz.ps1) i wyniki
+testdane/**/*.jpg
+wynik*/
+proba/zrzuty/
+proba/pobierz-test/
+proba/pw/node_modules/

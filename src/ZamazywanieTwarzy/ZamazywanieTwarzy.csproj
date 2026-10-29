@@ -1,0 +1,37 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>ZamazywanieTwarzy</AssemblyName>
+    <IsWebConfigTransformDisabled>true</IsWebConfigTransformDisabled>
+  </PropertyGroup>
+
+  <!-- Publikacja „jeden plik, bez instalowania .NET”:
+       dotnet publish -c Release -r win-x64 -\-self-contained -p:PublishSingleFile=true
+         -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true -p:DebugType=none -o publikacja -->
+  <Target Name="UsunZbedneZPublikacji" AfterTargets="Publish">
+    <ItemGroup>
+      <ZbednePliki Include="$(PublishDir)*.pdb;$(PublishDir)*.lib;$(PublishDir)web.config" />
+    </ItemGroup>
+    <Delete Files="@(ZbednePliki)" />
+  </Target>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.14" />
+    <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.31.1" />
+    <PackageReference Include="SkiaSharp" Version="4.154.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- ASP.NET Core też ma SessionOptions; w tym projekcie chodzi zawsze o opcje ONNX Runtime -->
+    <Using Include="Microsoft.ML.OnnxRuntime.SessionOptions" Alias="SessionOptions" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Update="wwwroot\**" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <None Update="modele\*.onnx;modele\LICENSE-*.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>
