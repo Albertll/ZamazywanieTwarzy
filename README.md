@@ -39,8 +39,10 @@ Z repozytorium: `dotnet run --project src\ZamazywanieTwarzy` (wymaga .NET 10 SDK
 „jeden plik, bez instalowania .NET” (sekcja *Budowanie*) — powstaje `publikacja\ZamazywanieTwarzy.exe`, obok którego
 muszą leżeć katalogi `modele` i `wwwroot`. Program otwiera przeglądarkę sam. Okno konsoli to serwer: jego zamknięcie albo przycisk „Zakończ” wyłącza program.
 
-Dane programu (baza osób i wzorców twarzy, miniatury) trafiają do `dane\` obok pliku .exe.
-Inne miejsce: `ZamazywanieTwarzy.exe --dane D:\Zaszyfrowany\dane`. **To dane biometryczne — trzymaj je na zaszyfrowanym dysku.**
+Dane programu (osoby, zgody, decyzje, wycinki twarzy, miniatury) trafiają do `dane\` obok pliku .exe.
+Inne miejsce: `ZamazywanieTwarzy.exe --dane D:\Zaszyfrowany\dane`. Wektorów cech twarzy (danych biometrycznych) program
+nie zapisuje — patrz [Dane osobowe i biometria](#dane-osobowe-i-biometria). Wycinki i miniatury to jednak zdjęcia twarzy,
+więc katalog danych warto trzymać na zaszyfrowanym dysku (program sam bazy nie szyfruje).
 
 Szybka próba na zdjęciach testowych (domena publiczna / CC — autorzy i licencje w `testdane\ZRODLA.md`;
 zdjęć nie ma w repozytorium):
@@ -84,6 +86,30 @@ Pozostałe funkcje:
 - **Zapis kopii** do osobnego katalogu (oryginały nietknięte), bez EXIF (GPS, miniatury), plus `raport.csv`.
   Zdjęcie zmienione po przetworzeniu nie zostanie zapisane, dopóki nie przetworzysz go ponownie.
 
+## Dane osobowe i biometria
+
+Dwa tryby pracy do wyboru w *Ustawieniach*:
+
+| | Z rozpoznawaniem (domyślny) | Bez rozpoznawania |
+|---|---|---|
+| Jak działa | porównuje twarze ze wzorcami osób i sam odsłania osoby ze zgodą | tylko znajduje twarze i zamazuje wszystkie; osoby ze zgodą odsłania operator, przypisując je z listy |
+| Wektory cech twarzy (dane biometryczne) | **tylko w pamięci RAM**, póki program działa — nigdy na dysku | nie powstają |
+| Na dysku | wyrównany wycinek twarzy 112×112 (JPEG), z którego po starcie liczy się wektory od nowa (kilka sekund przy kilkuset twarzach) | wycinek do podglądu na liście |
+| Porównywanie twarzy osób bez zgody | tak — żeby stwierdzić, że ktoś *nie* jest na liście | nie |
+
+- Przejście na tryb bez rozpoznawania usuwa wzorce twarzy, wycinki do porównywania i automatyczne dopasowania
+  (osoby, grupy, zgody i ręczne decyzje zostają). Powrót odtwarza wycinki z zapisanych punktów twarzy; wzorce trzeba dodać od nowa.
+- **Usuń dane katalogu…** (zakładka *Zdjęcia*) — po zakończeniu pracy usuwa wszystko o zdjęciach z katalogu: twarze
+  z wycinkami, decyzje, miniatury i podglądy. Baza zeruje kasowane rekordy (`secure_delete`) i jest od razu odchudzana
+  (`VACUUM`), więc usunięte dane nie zostają w pliku.
+- Baza z wersji 0.1 (wektory zapisane na dysku) jest przy pierwszym uruchomieniu przerabiana automatycznie: kolumny
+  z wektorami są usuwane, a wycinki odtwarzane ze zdjęć.
+
+**Nieprzechowywanie to nie to samo co nieprzetwarzanie.** W trybie z rozpoznawaniem program liczy i porównuje wektor
+każdej twarzy, także dziecka bez zgody. Europejska Rada Ochrony Danych w wytycznych 3/2019 opisuje analogiczny przykład
+(hotel rozpoznający gości VIP, którzy wyrazili zgodę) i wskazuje, że takie przetwarzanie wymaga podstawy prawnej także
+wobec pozostałych osób. Wybór trybu w szkole, przedszkolu czy klubie to decyzja dla inspektora ochrony danych, nie dla programu.
+
 ## Wyniki na zdjęciach testowych (dorośli, 17 zdjęć, 272 twarze)
 
 - Czas: 17 zdjęć 2600–4096 px w ~12 s (3 zdjęcia równolegle, procesor bez GPU).
@@ -120,9 +146,9 @@ dotnet publish src\ZamazywanieTwarzy -c Release -r win-x64 --self-contained -p:P
 | Plik | Rola |
 |---|---|
 | `Detektor.cs` | YuNet: kafelki 640×640 w 3 skalach (duże twarze / typowe / małe w tle), scalanie NMS |
-| `Rozpoznawanie.cs` | SFace: wyrównanie twarzy wg 5 punktów do 112×112, wektor 128 cech |
+| `Rozpoznawanie.cs` | SFace: wyrównanie twarzy wg 5 punktów do 112×112, wektor 128 cech (liczony zawsze z zapisanego wycinka) |
 | `Zamazywanie.cs` | owal z zapasem, zmniejszenie do kilku pikseli + rozmycie (nieodwracalne) |
-| `Silnik.cs` | przetwarzanie, dopasowanie do osób, reguły kolorów, import, zapis kopii |
+| `Silnik.cs` | przetwarzanie, wektory cech w pamięci, dopasowanie do osób, reguły kolorów, tryby, import, zapis kopii, sprzątanie |
 | `Baza.cs` | SQLite: osoby, grupy, wzorce, zdjęcia, twarze |
 | `Program.cs`, `Api.cs` | serwer na 127.0.0.1, losowy klucz w adresie, API dla interfejsu |
 | `wwwroot\` | interfejs (HTML/CSS/JS bez bibliotek) |
@@ -130,8 +156,9 @@ dotnet publish src\ZamazywanieTwarzy -c Release -r win-x64 --self-contained -p:P
 Bezpieczeństwo serwera: nasłuch tylko na 127.0.0.1, losowy klucz w adresie otwieranym przy starcie (ciasteczko
 `SameSite=Strict`), sprawdzanie nagłówka `Host` (ochrona przed DNS rebinding) i własny nagłówek przy zmianach (CSRF).
 
-Testy: `proba\pw\ui-test.js` (przeklikanie ekranów) i `proba\pw\ui-akcje.js` (przypisanie, nowa osoba, „to nie twarz”,
-dorysowanie ramki, import CSV w Windows-1250, zapis kopii) — Edge przez playwright-core, serwer z `ZAMAZYWANIE_TOKEN`
+Testy: `proba\pw\ui-test.js` (przeklikanie ekranów), `proba\pw\ui-akcje.js` (przypisanie, nowa osoba, „to nie twarz”,
+dorysowanie ramki, import CSV w Windows-1250, zapis kopii), `ui-podpisy.js` i `ui-tryby.js` (tryb bez rozpoznawania,
+powrót, „Usuń dane katalogu”) — Edge przez playwright-core, serwer z `ZAMAZYWANIE_TOKEN`
 i `--port 5077`. Zrzuty ekranu: `proba\zrzuty\`.
 
 ## Licencje modeli

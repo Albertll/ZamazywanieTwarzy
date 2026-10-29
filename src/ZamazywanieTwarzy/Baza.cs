@@ -41,7 +41,7 @@ sealed class Baza
             x REAL NOT NULL, y REAL NOT NULL, w REAL NOT NULL, h REAL NOT NULL,
             pewnosc REAL NOT NULL,
             punkty TEXT NULL,
-            cechy BLOB NULL,
+            wyrownana BLOB NULL,
             miniatura BLOB NULL,
             reczna INTEGER NOT NULL DEFAULT 0,
             nie_twarz INTEGER NOT NULL DEFAULT 0,
@@ -57,7 +57,7 @@ sealed class Baza
             id INTEGER PRIMARY KEY,
             osoba_id INTEGER NOT NULL REFERENCES osoby(id) ON DELETE CASCADE,
             twarz_id INTEGER NULL REFERENCES twarze(id) ON DELETE SET NULL,
-            cechy BLOB NOT NULL,
+            wyrownana BLOB NULL,
             miniatura BLOB NOT NULL,
             zrodlo TEXT NOT NULL DEFAULT '',
             data_zdjecia TEXT NOT NULL,
@@ -74,13 +74,43 @@ sealed class Baza
         using var c = Otworz();
         Wykonaj(c, "PRAGMA journal_mode=WAL;");
         Wykonaj(c, Schemat);
+        UsunWektoryZDysku(c);
+    }
+
+    /// <summary>
+    /// Wersja 0.1 zapisywała wektory cech twarzy (dane biometryczne) w kolumnach „cechy”. Teraz wektory istnieją
+    /// tylko w pamięci, a na dysku leży wyrównany wycinek twarzy, z którego liczy się je od nowa — kolumny są usuwane,
+    /// a VACUUM fizycznie nadpisuje stare strony pliku.
+    /// </summary>
+    static void UsunWektoryZDysku(SqliteConnection c)
+    {
+        bool zmiana = false;
+        foreach (var tabela in new[] { "twarze", "wzorce" })
+        {
+            var kolumny = Lista(c, $"SELECT name FROM pragma_table_info('{tabela}')", r => r.GetString(0));
+            if (!kolumny.Contains("wyrownana")) Wykonaj(c, $"ALTER TABLE {tabela} ADD COLUMN wyrownana BLOB NULL");
+            if (kolumny.Contains("cechy"))
+            {
+                Wykonaj(c, $"ALTER TABLE {tabela} DROP COLUMN cechy");
+                zmiana = true;
+            }
+        }
+        if (zmiana) Odchudz(c);
+    }
+
+    /// <summary>Fizycznie usuwa skasowane dane z pliku bazy i z dziennika WAL.</summary>
+    public static void Odchudz(SqliteConnection c)
+    {
+        Wykonaj(c, "VACUUM;");
+        Wykonaj(c, "PRAGMA wal_checkpoint(TRUNCATE);");
     }
 
     public SqliteConnection Otworz()
     {
         var c = new SqliteConnection(_polaczenie);
         c.Open();
-        Wykonaj(c, "PRAGMA foreign_keys=ON; PRAGMA busy_timeout=10000;");
+        // secure_delete: kasowane rekordy (wycinki twarzy, decyzje) są zerowane w pliku, a nie tylko oznaczane jako wolne
+        Wykonaj(c, "PRAGMA foreign_keys=ON; PRAGMA busy_timeout=10000; PRAGMA secure_delete=ON;");
         return c;
     }
 

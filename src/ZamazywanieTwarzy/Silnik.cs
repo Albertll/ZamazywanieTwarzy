@@ -22,6 +22,13 @@ sealed class Zadanie
     public DateTime Start { get; } = DateTime.Now;
     public DateTime? Koniec { get; set; }
     public void Krok() => Interlocked.Increment(ref _gotowe);
+
+    public void Etap(string nazwa, int wszystkie)
+    {
+        Biezacy = nazwa;
+        Wszystkie = wszystkie;
+        Interlocked.Exchange(ref _gotowe, 0);
+    }
 }
 
 /// <summary>Cała logika aplikacji: przetwarzanie zdjęć, dopasowanie do osób, decyzje, import i zapis kopii.</summary>
@@ -34,7 +41,11 @@ sealed class Silnik : IDisposable
     readonly Detektor _detektor;
     readonly Rozpoznawanie _rozpoznawanie;
     readonly SessionOptions _opcje;
-    readonly Lock _blokadaZadania = new(), _blokadaDopasowania = new();
+    readonly Lock _blokadaZadania = new(), _blokadaDopasowania = new(), _blokadaPamieci = new();
+
+    // Wektory cech (dane biometryczne) istnieją tylko tutaj, w pamięci procesu — na dysku leżą wyrównane wycinki
+    // twarzy, z których po starcie programu liczy się je od nowa. Klucz: id wiersza w tabeli twarze / wzorce.
+    readonly ConcurrentDictionary<long, float[]> _cechyTwarzy = new(), _cechyWzorcow = new();
     CancellationTokenSource? _anuluj;
     Ustawienia? _ustawienia;
 
@@ -84,10 +95,37 @@ sealed class Silnik : IDisposable
         u.ProgWykrywania = Math.Clamp(u.ProgWykrywania, 0.3, 0.99);
         u.SilaZamazania = Math.Clamp(u.SilaZamazania, 3, 16);
         u.MiesiaceWzorca = Math.Clamp(u.MiesiaceWzorca, 1, 120);
+        if (u.Tryb != Ustawienia.TrybBezRozpoznawania) u.Tryb = Ustawienia.TrybRozpoznawania;
+        bool zmianaTrybu = u.Tryb != Ustawienia.Tryb;
+        if (zmianaTrybu && Zadanie is { Trwa: true })
+            throw new BladUzytkownika("Poczekaj na koniec bieżącego zadania, zanim zmienisz tryb.");
+
         using var c = _baza.Otworz();
         Baza.Wykonaj(c, "INSERT INTO ustawienia(klucz, wartosc) VALUES('ustawienia', @w) ON CONFLICT(klucz) DO UPDATE SET wartosc=excluded.wartosc",
             ("@w", JsonSerializer.Serialize(u, Json)));
         _ustawienia = u;
+        if (!zmianaTrybu) return;
+        if (u.RozpoznawanieWlaczone) PrzygotujPamiec();
+        else WylaczRozpoznawanie(c);
+    }
+
+    /// <summary>
+    /// Przejście na tryb bez rozpoznawania: znikają wzorce twarzy, wycinki do rozpoznawania i wyniki automatycznego
+    /// dopasowania. Zostają osoby, grupy, zgody i ręczne decyzje operatora.
+    /// </summary>
+    void WylaczRozpoznawanie(SqliteConnection c)
+    {
+        lock (_blokadaPamieci)
+        {
+            Baza.Transakcja(c, () =>
+            {
+                Baza.Wykonaj(c, "DELETE FROM wzorce");
+                Baza.Wykonaj(c, "UPDATE twarze SET wyrownana=NULL, osoba_auto=NULL, wynik_auto=NULL, wynik_2wz=NULL, wynik_druga=NULL, kandydaci=NULL");
+            });
+            _cechyTwarzy.Clear();
+            _cechyWzorcow.Clear();
+            Baza.Odchudz(c);
+        }
     }
 
     // ───────────── zadania w tle ─────────────
@@ -181,8 +219,9 @@ sealed class Silnik : IDisposable
             r => new[] { r.GetInt64(0), r.GetInt64(1), r.GetInt64(2) }, ("@s", plik)).FirstOrDefault();
         if (istniejace is not null && istniejace[1] == info.Length && istniejace[2] == zmod)
         {
-            // bez zmian — tylko nowy wybór grup, które mają być na zdjęciu
+            // bez zmian — tylko nowy wybór grup, które mają być na zdjęciu (i ewentualnie brakujące wycinki do rozpoznawania)
             Baza.Wykonaj(c, "UPDATE zdjecia SET grupy=@g WHERE id=@id", ("@g", grupy), ("@id", istniejace[0]));
+            if (u.RozpoznawanieWlaczone) UzupelnijWycinki(c, istniejace[0], plik);
             return;
         }
 
@@ -190,15 +229,18 @@ sealed class Silnik : IDisposable
         var wykrycia = _detektor.Wykryj(bmp, (float)u.ProgWykrywania, u.MaleTwarze);
         using var piksele = bmp.PeekPixels();
         using var obraz = SKImage.FromPixels(piksele);
-        var twarze = wykrycia
-            .Select(w => (W: w, Cechy: _rozpoznawanie.Cechy(obraz, w.Punkty), Mini: Obraz.Wycinek(obraz, w.X, w.Y, w.W, w.H)))
-            .ToList();
+        var twarze = wykrycia.Select(w =>
+        {
+            (byte[]? Wycinek, float[]? Cechy) opis = u.RozpoznawanieWlaczone ? _rozpoznawanie.Opisz(obraz, w.Punkty) : (null, null);
+            return (W: w, opis.Wycinek, opis.Cechy, Mini: Obraz.Wycinek(obraz, w.X, w.Y, w.W, w.H));
+        }).ToList();
         byte[] miniatura;
         using (var m = Obraz.Pomniejsz(bmp, 360))
             miniatura = Obraz.Koduj(m, jakosc: 80);
         var data = Exif.DataZrobienia(plik) ?? info.LastWriteTime;
 
         long id = istniejace?[0] ?? 0;
+        var noweCechy = new List<(long Id, float[] Cechy)>();
         Baza.Transakcja(c, () =>
         {
             (string, object?)[] pola =
@@ -208,6 +250,7 @@ sealed class Silnik : IDisposable
             ];
             if (id != 0)
             {
+                ZapomnijTwarze(c, "zdjecie_id=@id", ("@id", id));
                 Baza.Wykonaj(c, "DELETE FROM twarze WHERE zdjecie_id=@id", ("@id", id));
                 Baza.Wykonaj(c, "UPDATE zdjecia SET szerokosc=@w, wysokosc=@h, rozmiar=@r, zmodyfikowano=@m, data_zdjecia=@d, grupy=@g, przetworzono=@p WHERE id=@id", pola);
             }
@@ -217,13 +260,180 @@ sealed class Silnik : IDisposable
                 id = Baza.OstatnieId(c);
             }
             foreach (var t in twarze)
-                Baza.Wykonaj(c, "INSERT INTO twarze(zdjecie_id, x, y, w, h, pewnosc, punkty, cechy, miniatura) VALUES(@z, @x, @y, @w, @h, @p, @pk, @c, @m)",
+            {
+                Baza.Wykonaj(c, "INSERT INTO twarze(zdjecie_id, x, y, w, h, pewnosc, punkty, wyrownana, miniatura) VALUES(@z, @x, @y, @w, @h, @p, @pk, @wy, @m)",
                     ("@z", id), ("@x", t.W.X), ("@y", t.W.Y), ("@w", t.W.W), ("@h", t.W.H), ("@p", t.W.Pewnosc),
                     ("@pk", string.Join(";", t.W.Punkty.Select(v => v.ToString("0.#", CultureInfo.InvariantCulture)))),
-                    ("@c", Rozpoznawanie.DoBajtow(t.Cechy)), ("@m", t.Mini));
+                    ("@wy", t.Wycinek), ("@m", t.Mini));
+                if (t.Cechy is not null) noweCechy.Add((Baza.OstatnieId(c), t.Cechy));
+            }
         });
+        // do pamięci dopiero po zatwierdzeniu — wycofana transakcja nie zostawi wektora pod cudzym id
+        foreach (var (nid, cechy) in noweCechy) _cechyTwarzy[nid] = cechy;
         File.WriteAllBytes(SciezkaMiniatury(id), miniatura);
         File.Delete(SciezkaPodgladu(id));
+    }
+
+    /// <summary>
+    /// Twarze zdjęcia bez wyrównanego wycinka (przetworzone w trybie bez rozpoznawania albo w wersji 0.1)
+    /// dostają go z zapisanych punktów twarzy — bez ponownego wykrywania, więc ręczne decyzje zostają.
+    /// </summary>
+    int UzupelnijWycinki(SqliteConnection c, long zdjecieId, string plik)
+    {
+        var brak = Baza.Lista(c, "SELECT id, punkty FROM twarze WHERE zdjecie_id=@z AND reczna=0 AND wyrownana IS NULL AND punkty IS NOT NULL",
+            r => (Id: r.GetInt64(0), Punkty: r.GetString(1).Split(';').Select(v => float.Parse(v, CultureInfo.InvariantCulture)).ToArray()),
+            ("@z", zdjecieId));
+        if (brak.Count == 0) return 0;
+        using var bmp = Obraz.Wczytaj(plik);
+        using var piksele = bmp.PeekPixels();
+        using var obraz = SKImage.FromPixels(piksele);
+        foreach (var t in brak)
+        {
+            var (wycinek, cechy) = _rozpoznawanie.Opisz(obraz, t.Punkty);
+            Baza.Wykonaj(c, "UPDATE twarze SET wyrownana=@w WHERE id=@id", ("@w", wycinek), ("@id", t.Id));
+            _cechyTwarzy[t.Id] = cechy;
+        }
+        return brak.Count;
+    }
+
+    /// <summary>Usuwa z pamięci wektory twarzy, które za chwilę znikną z bazy (SQLite może ponownie użyć ich id).</summary>
+    void ZapomnijTwarze(SqliteConnection c, string warunek, params (string, object?)[] p)
+    {
+        foreach (var id in Baza.Lista(c, $"SELECT id FROM twarze WHERE {warunek}", r => r.GetInt64(0), p))
+            _cechyTwarzy.TryRemove(id, out _);
+    }
+
+    void ZapomnijWzorce(SqliteConnection c, string warunek, params (string, object?)[] p)
+    {
+        foreach (var id in Baza.Lista(c, $"SELECT id FROM wzorce WHERE {warunek}", r => r.GetInt64(0), p))
+            _cechyWzorcow.TryRemove(id, out _);
+    }
+
+    // ───────────── wektory cech w pamięci ─────────────
+
+    /// <summary>
+    /// Po starcie programu (albo po włączeniu rozpoznawania): odtwarza brakujące wycinki — baza z wersji 0.1 albo
+    /// zdjęcia przetworzone w trybie bez rozpoznawania — i liczy w pamięci wektory wszystkich twarzy i wzorców.
+    /// </summary>
+    public void PrzygotujPamiec()
+    {
+        if (!Ustawienia.RozpoznawanieWlaczone) return;
+        using (var c = _baza.Otworz())
+            if (Convert.ToInt64(Baza.Skalar(c, "SELECT (SELECT COUNT(*) FROM twarze WHERE reczna=0) + (SELECT COUNT(*) FROM wzorce)")) == 0)
+                return;
+        Uruchom("Wczytywanie twarzy do pamięci", (z, token) =>
+        {
+            OdtworzWycinkiTwarzy(z, token);
+            OdtworzWycinkiWzorcow(z, token);
+            UzupelnijCechy(z, token);
+            z.Etap("Dopasowanie do osób", 0);
+            DopasujWszystko();
+            z.Komunikat = $"W pamięci: {_cechyTwarzy.Count} twarzy i {_cechyWzorcow.Count} wzorców" + (z.Bledy.IsEmpty ? "" : $", uwagi: {z.Bledy.Count}");
+            return Task.CompletedTask;
+        });
+    }
+
+    void OdtworzWycinkiTwarzy(Zadanie z, CancellationToken token)
+    {
+        using var c = _baza.Otworz();
+        var zdjecia = Baza.Lista(c, """
+            SELECT DISTINCT z.id, z.sciezka, z.rozmiar, z.zmodyfikowano FROM zdjecia z JOIN twarze t ON t.zdjecie_id = z.id
+            WHERE t.reczna = 0 AND t.wyrownana IS NULL AND t.punkty IS NOT NULL
+            """, r => (Id: r.GetInt64(0), Sciezka: r.GetString(1), Rozmiar: r.GetInt64(2), Zmod: r.GetInt64(3)));
+        if (zdjecia.Count == 0) return;
+        z.Etap("Przygotowanie wycinków twarzy", zdjecia.Count);
+        int pominiete = 0;
+        Parallel.ForEach(zdjecia, new ParallelOptions { MaxDegreeOfParallelism = Rownoleglosc, CancellationToken = token }, zd =>
+        {
+            var info = new FileInfo(zd.Sciezka);
+            if (info.Exists && info.Length == zd.Rozmiar && info.LastWriteTimeUtc.Ticks == zd.Zmod)
+            {
+                try
+                {
+                    using var cz = _baza.Otworz();
+                    UzupelnijWycinki(cz, zd.Id, zd.Sciezka);
+                }
+                catch (Exception ex) { z.Bledy.Enqueue($"{Path.GetFileName(zd.Sciezka)}: {ex.Message}"); }
+            }
+            else Interlocked.Increment(ref pominiete);
+            z.Krok();
+        });
+        if (pominiete > 0)
+            z.Bledy.Enqueue($"Zdjęć brakujących albo zmienionych od przetworzenia: {pominiete} — ich twarze zostają zamazane, dopóki nie przetworzysz katalogu ponownie.");
+    }
+
+    /// <summary>Wzorce z wersji 0.1 (sam wektor, bez wycinka): wycinek z twarzy, z której powstały, albo ze zdjęcia źródłowego.</summary>
+    void OdtworzWycinkiWzorcow(Zadanie z, CancellationToken token)
+    {
+        using var c = _baza.Otworz();
+        var brak = Baza.Lista(c, """
+            SELECT w.id, w.zrodlo, t.wyrownana, o.imie || ' ' || o.nazwisko
+            FROM wzorce w JOIN osoby o ON o.id = w.osoba_id LEFT JOIN twarze t ON t.id = w.twarz_id
+            WHERE w.wyrownana IS NULL
+            """, r => (Id: r.GetInt64(0), Zrodlo: r.GetString(1), ZTwarzy: r.IsDBNull(2) ? null : (byte[])r[2], Osoba: r.GetString(3)));
+        if (brak.Count == 0) return;
+        z.Etap("Odtwarzanie wzorców z poprzedniej wersji", brak.Count);
+        var u = Ustawienia;
+        foreach (var w in brak)
+        {
+            token.ThrowIfCancellationRequested();
+            byte[]? wycinek = w.ZTwarzy;
+            try
+            {
+                if (wycinek is null && File.Exists(w.Zrodlo))
+                {
+                    using var bmp = Obraz.Wczytaj(w.Zrodlo);
+                    var twarz = _detektor.Wykryj(bmp, (float)u.ProgWykrywania, false).MaxBy(d => d.Pole);
+                    if (twarz is not null)
+                    {
+                        using var piksele = bmp.PeekPixels();
+                        using var obraz = SKImage.FromPixels(piksele);
+                        wycinek = _rozpoznawanie.Opisz(obraz, twarz.Punkty).Wycinek;
+                    }
+                }
+            }
+            catch (Exception) { wycinek = null; }
+
+            if (wycinek is not null)
+                Baza.Wykonaj(c, "UPDATE wzorce SET wyrownana=@w WHERE id=@id", ("@w", wycinek), ("@id", w.Id));
+            else
+            {
+                Baza.Wykonaj(c, "DELETE FROM wzorce WHERE id=@id", ("@id", w.Id));
+                z.Bledy.Enqueue($"{w.Osoba.Trim()}: usunięto wzorzec, którego nie da się odtworzyć (brak pliku {w.Zrodlo})");
+            }
+            z.Krok();
+        }
+        Baza.Odchudz(c);
+    }
+
+    /// <summary>Liczy w pamięci wektory twarzy i wzorców, których jeszcze tam nie ma (wycinki są w bazie).</summary>
+    void UzupelnijCechy(Zadanie? z = null, CancellationToken token = default)
+    {
+        lock (_blokadaPamieci)
+        {
+            using var c = _baza.Otworz();
+            var twarze = Baza.Lista(c, "SELECT id FROM twarze WHERE wyrownana IS NOT NULL", r => r.GetInt64(0)).Where(id => !_cechyTwarzy.ContainsKey(id)).ToList();
+            var wzorce = Baza.Lista(c, "SELECT id FROM wzorce WHERE wyrownana IS NOT NULL", r => r.GetInt64(0)).Where(id => !_cechyWzorcow.ContainsKey(id)).ToList();
+            if (twarze.Count + wzorce.Count == 0) return;
+            z?.Etap("Liczenie cech twarzy w pamięci", twarze.Count + wzorce.Count);
+            Licz(c, "twarze", twarze, _cechyTwarzy, z, token);
+            Licz(c, "wzorce", wzorce, _cechyWzorcow, z, token);
+        }
+    }
+
+    void Licz(SqliteConnection c, string tabela, List<long> idki, ConcurrentDictionary<long, float[]> cel, Zadanie? z, CancellationToken token)
+    {
+        foreach (var paczka in idki.Chunk(400))
+        {
+            token.ThrowIfCancellationRequested();
+            var wycinki = Baza.Lista(c, $"SELECT id, wyrownana FROM {tabela} WHERE id IN ({string.Join(",", paczka)})",
+                r => (Id: r.GetInt64(0), Wycinek: (byte[])r[1]));
+            Parallel.ForEach(wycinki, new ParallelOptions { MaxDegreeOfParallelism = Rownoleglosc }, w =>
+            {
+                cel[w.Id] = _rozpoznawanie.CechyZWycinka(w.Wycinek);
+                z?.Krok();
+            });
+        }
     }
 
     // ───────────── dopasowanie twarzy do osób ─────────────
@@ -235,15 +445,18 @@ sealed class Silnik : IDisposable
     /// </summary>
     public void DopasujWszystko()
     {
+        if (!Ustawienia.RozpoznawanieWlaczone) return;
+        UzupelnijCechy();
         lock (_blokadaDopasowania)
         {
             using var c = _baza.Otworz();
-            var wzorce = Baza.Lista(c, "SELECT osoba_id, cechy FROM wzorce", r => (Osoba: r.GetInt64(0), Cechy: Rozpoznawanie.ZBajtow((byte[])r[1])))
-                .GroupBy(w => w.Osoba).ToDictionary(g => g.Key, g => g.Select(x => x.Cechy).ToArray());
+            var wzorce = Baza.Lista(c, "SELECT id, osoba_id FROM wzorce", r => (Id: r.GetInt64(0), Osoba: r.GetInt64(1)))
+                .Where(w => _cechyWzorcow.ContainsKey(w.Id))
+                .GroupBy(w => w.Osoba).ToDictionary(g => g.Key, g => g.Select(x => _cechyWzorcow[x.Id]).ToArray());
             var grupyOsob = Baza.Lista(c, "SELECT osoba_id, grupa_id FROM osoby_grupy", r => (r.GetInt64(0), r.GetInt64(1)))
                 .ToLookup(x => x.Item1, x => x.Item2);
-            var twarze = Baza.Lista(c, "SELECT t.id, t.cechy, z.grupy FROM twarze t JOIN zdjecia z ON z.id = t.zdjecie_id WHERE t.cechy IS NOT NULL",
-                r => (Id: r.GetInt64(0), Cechy: Rozpoznawanie.ZBajtow((byte[])r[1]), Grupy: r.GetString(2)));
+            var twarze = Baza.Lista(c, "SELECT t.id, z.grupy FROM twarze t JOIN zdjecia z ON z.id = t.zdjecie_id WHERE t.reczna = 0",
+                r => (Id: r.GetInt64(0), Grupy: r.GetString(1)));
 
             Baza.Transakcja(c, () =>
             {
@@ -258,6 +471,14 @@ sealed class Silnik : IDisposable
 
                 foreach (var t in twarze)
                 {
+                    pid.Value = t.Id;
+                    // Bez wycinka (zdjęcie zniknęło albo zmieniło się) nie ma czego porównać — twarz zostaje nierozpoznana, czyli zamazana.
+                    if (!_cechyTwarzy.TryGetValue(t.Id, out var cechyTwarzy))
+                    {
+                        po.Value = pw.Value = pw2.Value = pd.Value = pk.Value = DBNull.Value;
+                        cmd.ExecuteNonQuery();
+                        continue;
+                    }
                     HashSet<long>? dozwolone = t.Grupy.Length == 0 ? null : t.Grupy.Split(',').Select(long.Parse).ToHashSet();
                     var oceny = new List<(long Osoba, float Najlepszy, float Drugi)>();
                     foreach (var (osoba, cechy) in wzorce)
@@ -266,14 +487,13 @@ sealed class Silnik : IDisposable
                         float b1 = -1, b2 = -1;
                         foreach (var w in cechy)
                         {
-                            float s = Rozpoznawanie.Podobienstwo(t.Cechy, w);
+                            float s = Rozpoznawanie.Podobienstwo(cechyTwarzy, w);
                             if (s > b1) { b2 = b1; b1 = s; }
                             else if (s > b2) b2 = s;
                         }
                         oceny.Add((osoba, b1, b2));
                     }
                     oceny.Sort((a, b) => b.Najlepszy.CompareTo(a.Najlepszy));
-                    pid.Value = t.Id;
                     po.Value = oceny.Count > 0 ? oceny[0].Osoba : DBNull.Value;
                     pw.Value = oceny.Count > 0 ? oceny[0].Najlepszy : DBNull.Value;
                     pw2.Value = oceny.Count > 0 && oceny[0].Drugi > -1 ? oceny[0].Drugi : DBNull.Value;
@@ -305,7 +525,7 @@ sealed class Silnik : IDisposable
         string wynik = t.WynikAuto is double w ? w.ToString("0.00", CultureInfo.InvariantCulture) : "";
 
         if (t.Wymus) return new("czerwony", true, (o is null ? "" : o.Nazwa + " — ") + "zamazywana zawsze (decyzja ręczna)", osobaId);
-        if (o is null) return new("zolty", true, "Nierozpoznana", null);
+        if (o is null) return new("zolty", true, u.RozpoznawanieWlaczone ? "Nierozpoznana" : "Nieprzypisana — zamazywana", null);
         if (!o.ZgodaWazna)
             return new("czerwony", true, $"{o.Nazwa} — brak ważnej zgody" + (auto ? $" ({wynik})" : ""), o.Id);
         if (!auto)
@@ -416,16 +636,17 @@ sealed class Silnik : IDisposable
     /// <summary>Nierozpoznane twarze z katalogu pogrupowane po podobieństwie — „to ta sama osoba”.</summary>
     public object Nierozpoznane(string? katalog, bool podkatalogi)
     {
-        if (string.IsNullOrWhiteSpace(katalog)) return Array.Empty<object>();
-        using var c = _baza.Otworz();
         var u = Ustawienia;
+        // grupowanie podobnych twarzy to też porównywanie biometryczne
+        if (string.IsNullOrWhiteSpace(katalog) || !u.RozpoznawanieWlaczone) return Array.Empty<object>();
+        UzupelnijCechy();
+        using var c = _baza.Otworz();
         var osoby = WczytajOsoby(c);
         var (warunek, parametry) = WarunekKatalogu(katalog, podkatalogi);
-        var zolte = WczytajTwarze(c, warunek + " AND t.cechy IS NOT NULL", parametry)
-            .Where(t => Status(t, osoby, u).Kolor == "zolty").ToList();
+        var zolte = WczytajTwarze(c, warunek, parametry)
+            .Where(t => _cechyTwarzy.ContainsKey(t.Id) && Status(t, osoby, u).Kolor == "zolty").ToList();
         if (zolte.Count == 0) return Array.Empty<object>();
-        var cechy = Baza.Lista(c, $"SELECT t.id, t.cechy FROM twarze t JOIN zdjecia z ON z.id = t.zdjecie_id WHERE {warunek} AND t.cechy IS NOT NULL",
-            r => (Id: r.GetInt64(0), Cechy: Rozpoznawanie.ZBajtow((byte[])r[1])), parametry).ToDictionary(x => x.Id, x => x.Cechy);
+        var cechy = zolte.ToDictionary(t => t.Id, t => _cechyTwarzy[t.Id]);
 
         // Próg wyraźnie powyżej rozpoznania: małe, nieostre twarze są do siebie „podobne” bez względu na osobę.
         float prog = (float)Math.Max(u.ProgRozpoznania + 0.1, 0.5);
@@ -533,18 +754,20 @@ sealed class Silnik : IDisposable
         using var c = _baza.Otworz();
         if (Baza.Skalar(c, "SELECT 1 FROM osoby WHERE id=@o", ("@o", osobaId)) is null)
             throw new BladUzytkownika("Nie ma takiej osoby.");
+        wzorzec &= Ustawienia.RozpoznawanieWlaczone;
         Baza.Transakcja(c, () =>
         {
             foreach (var t in twarze)
             {
                 Baza.Wykonaj(c, "UPDATE twarze SET osoba_reczna=@o, nie_twarz=0 WHERE id=@t AND reczna=0", ("@o", osobaId), ("@t", t));
+                ZapomnijWzorce(c, "twarz_id=@t", ("@t", t));
                 Baza.Wykonaj(c, "DELETE FROM wzorce WHERE twarz_id=@t", ("@t", t));
                 if (wzorzec)
                     Baza.Wykonaj(c, """
-                        INSERT INTO wzorce(osoba_id, twarz_id, cechy, miniatura, zrodlo, data_zdjecia, dodano)
-                        SELECT @o, t.id, t.cechy, t.miniatura, z.sciezka, COALESCE(z.data_zdjecia, @teraz), @teraz
+                        INSERT INTO wzorce(osoba_id, twarz_id, wyrownana, miniatura, zrodlo, data_zdjecia, dodano)
+                        SELECT @o, t.id, t.wyrownana, t.miniatura, z.sciezka, COALESCE(z.data_zdjecia, @teraz), @teraz
                         FROM twarze t JOIN zdjecia z ON z.id = t.zdjecie_id
-                        WHERE t.id = @t AND t.cechy IS NOT NULL AND t.miniatura IS NOT NULL
+                        WHERE t.id = @t AND t.wyrownana IS NOT NULL AND t.miniatura IS NOT NULL
                         """, ("@o", osobaId), ("@t", t), ("@teraz", Baza.Iso(DateTime.Now)));
             }
         });
@@ -568,12 +791,17 @@ sealed class Silnik : IDisposable
                 if (p.Cofnij)
                 {
                     Baza.Wykonaj(c, "UPDATE twarze SET osoba_reczna=NULL, nie_twarz=0, wymus=0 WHERE id=@t", ("@t", t));
+                    ZapomnijWzorce(c, "twarz_id=@t", ("@t", t));
                     Baza.Wykonaj(c, "DELETE FROM wzorce WHERE twarz_id=@t", ("@t", t));
                 }
                 if (p.NieTwarz is bool nt)
                 {
                     Baza.Wykonaj(c, "UPDATE twarze SET nie_twarz=@v, osoba_reczna=CASE WHEN @v=1 THEN NULL ELSE osoba_reczna END WHERE id=@t", ("@v", nt ? 1 : 0), ("@t", t));
-                    if (nt) Baza.Wykonaj(c, "DELETE FROM wzorce WHERE twarz_id=@t", ("@t", t));
+                    if (nt)
+                    {
+                        ZapomnijWzorce(c, "twarz_id=@t", ("@t", t));
+                        Baza.Wykonaj(c, "DELETE FROM wzorce WHERE twarz_id=@t", ("@t", t));
+                    }
                 }
                 if (p.Wymus is bool w)
                     Baza.Wykonaj(c, "UPDATE twarze SET wymus=@v WHERE id=@t", ("@v", w ? 1 : 0), ("@t", t));
@@ -673,6 +901,7 @@ sealed class Silnik : IDisposable
     public void UsunOsobe(long id)
     {
         using var c = _baza.Otworz();
+        ZapomnijWzorce(c, "osoba_id=@id", ("@id", id));
         Baza.Wykonaj(c, "DELETE FROM osoby WHERE id=@id", ("@id", id));
         DopasujWszystko();
     }
@@ -693,6 +922,7 @@ sealed class Silnik : IDisposable
     public void UsunWzorzec(long id)
     {
         using var c = _baza.Otworz();
+        ZapomnijWzorce(c, "id=@id", ("@id", id));
         Baza.Wykonaj(c, "DELETE FROM wzorce WHERE id=@id", ("@id", id));
         DopasujWszystko();
     }
@@ -848,6 +1078,8 @@ sealed class Silnik : IDisposable
     {
         var katalog = Normalizuj(p.Katalog);
         var u = Ustawienia;
+        if (!u.RozpoznawanieWlaczone)
+            throw new BladUzytkownika("Wzorce twarzy są potrzebne tylko w trybie z rozpoznawaniem (Ustawienia).");
         Uruchom("Import wzorców", (z, token) =>
         {
             var pliki = Directory.GetDirectories(katalog).Order(Polski)
@@ -909,11 +1141,12 @@ sealed class Silnik : IDisposable
             z.Bledy.Enqueue($"{nazwa}\\{Path.GetFileName(plik)}: kilka podobnej wielkości twarzy — wzięto największą, sprawdź wzorce osoby");
         using var piksele = bmp.PeekPixels();
         using var obraz = SKImage.FromPixels(piksele);
-        var cechy = _rozpoznawanie.Cechy(obraz, w.Punkty);
+        var (wycinek, cechy) = _rozpoznawanie.Opisz(obraz, w.Punkty);
         var data = Exif.DataZrobienia(plik) ?? File.GetLastWriteTime(plik);
-        Baza.Wykonaj(c, "INSERT INTO wzorce(osoba_id, cechy, miniatura, zrodlo, data_zdjecia, dodano) VALUES(@o, @c, @m, @z, @d, @t)",
-            ("@o", osoba), ("@c", Rozpoznawanie.DoBajtow(cechy)), ("@m", Obraz.Wycinek(obraz, w.X, w.Y, w.W, w.H)),
+        Baza.Wykonaj(c, "INSERT INTO wzorce(osoba_id, wyrownana, miniatura, zrodlo, data_zdjecia, dodano) VALUES(@o, @w, @m, @z, @d, @t)",
+            ("@o", osoba), ("@w", wycinek), ("@m", Obraz.Wycinek(obraz, w.X, w.Y, w.W, w.H)),
             ("@z", plik), ("@d", Baza.Iso(data)), ("@t", Baza.Iso(DateTime.Now)));
+        _cechyWzorcow[Baza.OstatnieId(c)] = cechy;
     }
 
     // ───────────── zapis zamazanych kopii ─────────────
@@ -982,6 +1215,40 @@ sealed class Silnik : IDisposable
                 new UTF8Encoding(true));
             z.Komunikat = $"Zapisano {raport.Count} z {zdjecia.Count} zdjęć do {cel}" + (z.Bledy.IsEmpty ? "" : $", błędy: {z.Bledy.Count}");
         });
+    }
+
+    // ───────────── sprzątanie ─────────────
+
+    /// <summary>
+    /// Po zakończeniu pracy z katalogiem: usuwa z programu wszystko o jego zdjęciach — wykryte twarze z wycinkami,
+    /// decyzje, miniatury i podglądy. Zdjęcia na dysku, zapisane kopie, osoby i ich wzorce zostają.
+    /// </summary>
+    public object UsunDaneKatalogu(KatalogDto p)
+    {
+        if (string.IsNullOrWhiteSpace(p.Katalog)) throw new BladUzytkownika("Nie wybrano katalogu.");
+        if (Zadanie is { Trwa: true }) throw new BladUzytkownika("Poczekaj na koniec bieżącego zadania.");
+        var (warunek, parametry) = WarunekKatalogu(p.Katalog, p.Podkatalogi);
+        using var c = _baza.Otworz();
+        var zdjecia = Baza.Lista(c, $"SELECT z.id FROM zdjecia z WHERE {warunek}", r => r.GetInt64(0), parametry);
+        if (zdjecia.Count == 0) throw new BladUzytkownika("Program nie ma żadnych danych o zdjęciach z tego katalogu.");
+        long twarze = 0;
+        var wZdjeciach = $"zdjecie_id IN (SELECT z.id FROM zdjecia z WHERE {warunek})";
+        lock (_blokadaPamieci)
+        {
+            Baza.Transakcja(c, () =>
+            {
+                twarze = Convert.ToInt64(Baza.Skalar(c, $"SELECT COUNT(*) FROM twarze WHERE {wZdjeciach}", parametry));
+                ZapomnijTwarze(c, wZdjeciach, parametry);
+                Baza.Wykonaj(c, $"DELETE FROM zdjecia WHERE id IN (SELECT z.id FROM zdjecia z WHERE {warunek})", parametry);
+            });
+            Baza.Odchudz(c);
+        }
+        foreach (var id in zdjecia)
+        {
+            File.Delete(SciezkaMiniatury(id));
+            File.Delete(SciezkaPodgladu(id));
+        }
+        return new { Zdjecia = zdjecia.Count, Twarze = twarze };
     }
 
     // ───────────── przeglądanie katalogów ─────────────

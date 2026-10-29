@@ -36,6 +36,8 @@ builder.WebHost.ConfigureKestrel(o => o.Listen(IPAddress.Loopback, port));
 Console.OutputEncoding = System.Text.Encoding.UTF8;
 Console.WriteLine("Zamazywanie twarzy — ładowanie modeli...");
 using var silnik = new Silnik(Path.Combine(katalogAplikacji, "modele"), katalogDanych);
+// wektory cech twarzy nie są zapisywane na dysku — po starcie liczy się je od nowa z wycinków (w tle, z paskiem postępu)
+silnik.PrzygotujPamiec();
 var app = builder.Build();
 
 string token = Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant();

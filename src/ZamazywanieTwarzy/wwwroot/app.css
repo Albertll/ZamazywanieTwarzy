@@ -28,6 +28,7 @@
 }
 
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 body { margin: 0; font: 14px/1.45 system-ui, "Segoe UI", sans-serif; background: var(--tlo); color: var(--tekst); }
 button, input, select { font: inherit; color: inherit; }
 button {
@@ -215,6 +216,10 @@ details .glowny { margin-top: 10px; }
 .ustawienia { display: grid; gap: 14px; max-width: 760px; background: var(--karta); padding: 16px 20px; border-radius: 10px; box-shadow: var(--cien); }
 .ustawienie { display: grid; grid-template-columns: 1fr 120px; gap: 4px 16px; align-items: center; }
 .ustawienie p { grid-column: 1 / -1; margin: 0; color: var(--slabszy); font-size: 13px; }
+.tryby { display: grid; gap: 6px; padding: 10px; }
+.tryb { display: flex; gap: 10px; align-items: flex-start; padding: 8px 10px; border-radius: 8px; cursor: pointer; border: 1px solid transparent; }
+.tryb input { margin-top: 3px; flex: none; }
+.tryb:has(input:checked) { background: var(--tlo); border-color: var(--linia); }
 
 #toast {
   position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%) translateY(120px); transition: transform .25s;

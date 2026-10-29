@@ -23,6 +23,7 @@ static class Api
         api.MapGet("/zdjecia/{id:long}/miniatura", (long id) => Jpeg(s.MiniaturaZdjecia(id)));
         api.MapGet("/zdjecia/{id:long}/podglad", (long id, bool? zamazane) => Jpeg(s.Podglad(id, zamazane == true)));
         api.MapPost("/zdjecia/{id:long}/twarze", (long id, RamkaDto r) => new { id = s.DodajRamke(id, r) });
+        api.MapPost("/zdjecia/usun-dane", (KatalogDto p) => s.UsunDaneKatalogu(p));
 
         api.MapGet("/twarze/{id:long}/miniatura", (long id) => Jpeg(s.MiniaturaTwarzy(id)));
         api.MapDelete("/twarze/{id:long}", (long id) => { s.UsunRamke(id); return Results.Ok(); });

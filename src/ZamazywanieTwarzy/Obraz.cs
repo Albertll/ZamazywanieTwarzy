@@ -28,6 +28,17 @@ static class Obraz
         return Obroc(bmp, kodek.EncodedOrigin);
     }
 
+    /// <summary>Dekoduje obraz z pamięci zawsze do BGRA (SKBitmap.Decode zwraca format zależny od platformy).</summary>
+    public static SKBitmap DekodujBgra(byte[] bajty)
+    {
+        using var dane = SKData.CreateCopy(bajty);
+        using var kodek = SKCodec.Create(dane) ?? throw new InvalidDataException("Nieczytelny obraz.");
+        var info = new SKImageInfo(kodek.Info.Width, kodek.Info.Height, SKColorType.Bgra8888, SKAlphaType.Premul);
+        var bmp = new SKBitmap(info);
+        kodek.GetPixels(info, bmp.GetPixels());
+        return bmp;
+    }
+
     static SKBitmap Obroc(SKBitmap zrodlo, SKEncodedOrigin orientacja)
     {
         if (orientacja is SKEncodedOrigin.TopLeft or SKEncodedOrigin.Default)

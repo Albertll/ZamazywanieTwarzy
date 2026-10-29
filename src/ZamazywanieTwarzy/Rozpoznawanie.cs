@@ -7,6 +7,8 @@ namespace ZamazywanieTwarzy;
 /// Rozpoznawanie twarzy SFace (OpenCV Zoo, licencja Apache 2.0): wyrównanie twarzy do wzorca 112×112
 /// według 5 punktów i wektor 128 cech. Wektory są normalizowane, więc podobieństwo dwóch twarzy
 /// to zwykły iloczyn skalarny (cosinus kąta).
+/// Wektor (dana biometryczna) nie trafia na dysk — zapisuje się wyrównany wycinek (JPEG), a wektor liczy się
+/// zawsze z odkodowanego wycinka, więc po ponownym uruchomieniu wychodzi identyczny.
 /// </summary>
 sealed class Rozpoznawanie : IDisposable
 {
@@ -27,9 +29,22 @@ sealed class Rozpoznawanie : IDisposable
         _wyjscie = _sesja.OutputMetadata.Keys.First();
     }
 
-    public float[] Cechy(SKImage obraz, float[] punkty)
+    /// <summary>Wyrównany wycinek twarzy do zapisania na dysku i wektor cech policzony z tego samego wycinka.</summary>
+    public (byte[] Wycinek, float[] Cechy) Opisz(SKImage obraz, float[] punkty)
     {
         using var wyrownana = Wyrownaj(obraz, punkty);
+        var wycinek = Obraz.Koduj(wyrownana, jakosc: 95);
+        return (wycinek, CechyZWycinka(wycinek));
+    }
+
+    public float[] CechyZWycinka(byte[] wycinek)
+    {
+        using var bmp = Obraz.DekodujBgra(wycinek);
+        return Cechy(bmp);
+    }
+
+    float[] Cechy(SKBitmap wyrownana)
+    {
         var t = new float[3 * R * R];
         var px = wyrownana.GetPixelSpan();
         int pl = R * R;
@@ -92,20 +107,6 @@ sealed class Rozpoznawanie : IDisposable
         float s = 0;
         for (int i = 0; i < a.Length; i++) s += a[i] * b[i];
         return s;
-    }
-
-    public static byte[] DoBajtow(float[] v)
-    {
-        var b = new byte[v.Length * 4];
-        Buffer.BlockCopy(v, 0, b, 0, b.Length);
-        return b;
-    }
-
-    public static float[] ZBajtow(byte[] b)
-    {
-        var v = new float[b.Length / 4];
-        Buffer.BlockCopy(b, 0, v, 0, b.Length);
-        return v;
     }
 
     public void Dispose() => _sesja.Dispose();

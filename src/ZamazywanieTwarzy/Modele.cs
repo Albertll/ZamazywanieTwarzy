@@ -13,6 +13,18 @@ sealed record Wykrycie(float X, float Y, float W, float H, float Pewnosc, float[
 /// <summary>Ustawienia zapisywane w bazie (JSON).</summary>
 sealed class Ustawienia
 {
+    public const string TrybRozpoznawania = "rozpoznawanie";
+    public const string TrybBezRozpoznawania = "bezRozpoznawania";
+
+    /// <summary>
+    /// „rozpoznawanie” — twarze porównywane ze wzorcami; wektory cech istnieją tylko w pamięci RAM.
+    /// „bezRozpoznawania” — tylko wykrywanie twarzy, osoby ze zgodą odsłania operator; żadnego przetwarzania biometrycznego.
+    /// </summary>
+    public string Tryb { get; set; } = TrybRozpoznawania;
+
+    [System.Text.Json.Serialization.JsonIgnore]
+    public bool RozpoznawanieWlaczone => Tryb != TrybBezRozpoznawania;
+
     /// <summary>Od tego podobieństwa twarz uznaje się za konkretną osobę (SFace: zalecane 0,363).</summary>
     public double ProgRozpoznania { get; set; } = 0.363;
 
@@ -76,3 +88,4 @@ record RamkaDto(float X, float Y, float W, float H);
 record GrupaDto(string Nazwa, bool Archiwalna);
 record ZgodaDto(bool Zgoda, string? ZgodaDo);
 record ImportWzorcowZadanie(string Katalog, long? GrupaId, bool Zgoda);
+record KatalogDto(string Katalog, bool Podkatalogi);

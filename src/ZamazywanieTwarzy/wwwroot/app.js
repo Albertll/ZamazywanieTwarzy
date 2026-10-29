@@ -17,7 +17,11 @@ const stan = {
   zadanie: null,
   grupaWybrana: null,
   szukaj: '',
+  ustawienia: null,
 };
+
+// Tryb „bez rozpoznawania”: tylko wykrywanie twarzy, osoby ze zgodą odsłania operator — chowamy wszystko, co porównuje twarze.
+const rozpoznawanie = () => stan.ustawienia?.tryb !== 'bezRozpoznawania';
 
 function wczytaj(klucz, domyslna) {
   try { const v = localStorage.getItem('zt.' + klucz); return v === null ? domyslna : JSON.parse(v); } catch { return domyslna; }
@@ -120,7 +124,16 @@ async function pokaz(widok) {
 
 async function odswiez() {
   const w = { zdjecia: widokZdjec, nierozpoznane: widokNierozpoznanych, osoby: widokOsob, ustawienia: widokUstawien }[stan.widok];
-  await bezpiecznie(w);
+  await bezpiecznie(async () => {
+    if (!stan.ustawienia) await zaladujUstawienia();
+    await w();
+  });
+}
+
+async function zaladujUstawienia() {
+  stan.ustawienia = await api('GET', '/api/ustawienia');
+  $('nav button[data-widok="nierozpoznane"]').hidden = !rozpoznawanie();
+  if (!rozpoznawanie() && stan.widok === 'nierozpoznane') stan.widok = 'zdjecia';
 }
 
 async function sprawdzZadanie() {
@@ -234,22 +247,26 @@ async function widokZdjec() {
         <button id="wybierz-katalog">Wybierz…</button>
         <label class="check"><input type="checkbox" id="podkatalogi" ${stan.podkatalogi ? 'checked' : ''}> razem z podkatalogami</label>
       </div>
-      <div class="pole-grupy">
+      ${rozpoznawanie() ? `<div class="pole-grupy">
         <span class="etykieta">Kto może być na zdjęciach — zawęża rozpoznawanie, działa przy „Przetwórz”</span>
         <div class="chipy">
           <button class="chip ${stan.grupyNaZdjeciach.length ? '' : 'wlaczony'}" data-grupa="">Wszyscy z bazy</button>
           ${aktywneGrupy.map(g => `<button class="chip ${stan.grupyNaZdjeciach.includes(g.id) ? 'wlaczony' : ''}" data-grupa="${g.id}">${esc(g.nazwa)}</button>`).join('')}
         </div>
-      </div>
+      </div>` : `<div class="pole-grupy podpowiedz">Tryb bez rozpoznawania: program tylko znajduje twarze i zamazuje wszystkie.
+        Osobę ze zgodą odsłaniasz, klikając jej twarz i przypisując ją z listy osób.</div>`}
       <div class="akcje">
         <button id="przetworz" class="glowny" ${stan.katalog ? '' : 'disabled'}>Przetwórz zdjęcia</button>
         <button id="eksportuj" ${stan.zdjecia.length && !stan.osobaFiltr ? '' : 'disabled'}>Zapisz zamazane kopie…</button>
+        <button id="usun-dane" class="cichy" ${stan.zdjecia.length && !stan.osobaFiltr ? '' : 'disabled'}
+          title="Po zakończeniu pracy: usuń z programu twarze, wycinki, decyzje i podglądy z tego katalogu">Usuń dane katalogu…</button>
       </div>
     </section>
     <section class="filtry">
       ${stan.osobaFiltr ? `<span class="chip wlaczony">Zdjęcia z osobą: ${esc(stan.osobaFiltr.nazwa)}<button id="bez-osoby" title="Wróć do katalogu">×</button></span>` : ''}
       ${FILTRY.map(([k, t, f]) => `<button class="filtr ${stan.filtr === k ? 'aktywny' : ''}" data-filtr="${k}">${t}<b>${stan.zdjecia.filter(f).length}</b></button>`).join('')}
-      <span class="legenda"><i class="kropka zielony"></i>zgoda — zostaje <i class="kropka czerwony"></i>bez zgody <i class="kropka zolty"></i>nierozpoznana — zamazana, do sprawdzenia</span>
+      <span class="legenda"><i class="kropka zielony"></i>zgoda — zostaje <i class="kropka czerwony"></i>bez zgody
+        <i class="kropka zolty"></i>${rozpoznawanie() ? 'nierozpoznana — zamazana, do sprawdzenia' : 'nieprzypisana — zamazana'}</span>
     </section>
     <section class="siatka">${widoczne.length ? widoczne.map(karta).join('') : `<p class="pusto">${pustaSiatka()}</p>`}</section>`;
 
@@ -272,6 +289,7 @@ async function widokZdjec() {
   $('#przetworz').onclick = () => bezpiecznie(() =>
     uruchomZadanie('/api/przetworz', { katalog: stan.katalog, podkatalogi: stan.podkatalogi, grupy: stan.grupyNaZdjeciach }));
   $('#eksportuj').onclick = eksportuj;
+  $('#usun-dane').onclick = usunDaneKatalogu;
   $$('.filtr').forEach(b => (b.onclick = () => { stan.filtr = b.dataset.filtr; widokZdjec(); }));
   const bezOsoby = $('#bez-osoby');
   if (bezOsoby) bezOsoby.onclick = () => { stan.osobaFiltr = null; odswiez(); };
@@ -310,6 +328,24 @@ async function eksportuj() {
   $('#ek-start', m).onclick = () => bezpiecznie(async () => {
     await uruchomZadanie('/api/eksport', { katalog: stan.katalog, podkatalogi: stan.podkatalogi, cel: $('#ek-cel', m).value });
     m.remove();
+  });
+}
+
+function usunDaneKatalogu() {
+  const twarze = stan.zdjecia.reduce((s, z) => s + z.zielone + z.czerwone + z.zolte, 0);
+  const m = otworzModal(`<div class="okno"><h2>Usuń dane katalogu</h2>
+    <p>Program usunie wszystko, co zapamiętał o ${stan.zdjecia.length} zdjęciach z katalogu <b>${esc(stan.katalog)}</b>:
+      wykryte twarze (${twarze}) z wycinkami, decyzje, miniatury i podglądy. Baza zostanie od razu „odchudzona”, żeby
+      usunięte dane nie zostały w pliku.</p>
+    <p><b>Zostają:</b> zdjęcia na dysku, zapisane zamazane kopie, osoby z grupami i zgodami${rozpoznawanie() ? ' oraz ich wzorce twarzy' : ''}.</p>
+    <p class="ostrzezenie">Jeśli zamazane kopie nie zostały jeszcze zapisane, decyzje dla tych zdjęć przepadną.</p>
+    <div class="stopka"><span class="odstep"></span><button id="ud-anuluj">Anuluj</button><button id="ud-ok" class="glowny">Usuń dane</button></div></div>`);
+  $('#ud-anuluj', m).onclick = () => m.remove();
+  $('#ud-ok', m).onclick = () => bezpiecznie(async () => {
+    const w = await api('POST', '/api/zdjecia/usun-dane', { katalog: stan.katalog, podkatalogi: stan.podkatalogi });
+    m.remove();
+    toast(`Usunięto dane ${w.zdjecia} zdjęć (${w.twarze} twarzy)`);
+    odswiez();
   });
 }
 
@@ -420,13 +456,15 @@ async function otworzZdjecie(id) {
     if (t.reczna)
       return naglowek + `<p class="podpowiedz">Ramka dorysowana ręcznie — ten obszar zawsze zostanie zamazany.</p>
         <button id="pz-usun-ramke" class="niebezpieczny">Usuń ramkę</button>`;
-    return naglowek + `
+    return naglowek + (rozpoznawanie() ? `
       <h3>Kto to jest?</h3>
       <div class="kandydaci">${t.kandydaci.filter(k => k.wynik >= 0.2).map(k => `<button class="kandydat" data-osoba="${k.osobaId}">
         <i class="kropka ${k.zgoda ? 'zielony' : 'czerwony'}"></i>${esc(k.nazwa)}<small>podobieństwo ${k.wynik.toFixed(2)}</small></button>`).join('')
-        || '<span class="podpowiedz">Nikt z bazy nie jest podobny. Wybierz osobę z listy albo dodaj nową.</span>'}</div>
+        || '<span class="podpowiedz">Nikt z bazy nie jest podobny. Wybierz osobę z listy albo dodaj nową.</span>'}</div>` : `
+      <h3>Kto to jest?</h3>
+      <p class="podpowiedz">Przypisz osobę z listy — jeśli ma zgodę, jej twarz zostanie odsłonięta.</p>`) + `
       <div class="wybor-osoby">${wyborOsoby('pz-osoba', t.przypisana ? t.osobaId : null)}<button id="pz-przypisz">Przypisz</button></div>
-      <label class="check"><input type="checkbox" id="pz-wzorzec" checked> zapamiętaj tę twarz jako wzorzec osoby</label>
+      ${rozpoznawanie() ? '<label class="check"><input type="checkbox" id="pz-wzorzec" checked> zapamiętaj tę twarz jako wzorzec osoby</label>' : ''}
       <details id="pz-nowa"><summary>+ Nowa osoba</summary>${formularzOsoby('pz-n', {})}
         <button id="pz-dodaj" class="glowny">Dodaj osobę i przypisz</button></details>
       <h3>Inne decyzje</h3>
@@ -455,7 +493,7 @@ async function otworzZdjecie(id) {
       el('#pz-usun-ramke').onclick = () => akcja(() => api('DELETE', '/api/twarze/' + t.id), 'Usunięto ramkę');
       return;
     }
-    const wzorzec = () => el('#pz-wzorzec').checked;
+    const wzorzec = () => el('#pz-wzorzec')?.checked ?? false;
     const przypisz = osobaId => akcja(() => api('POST', '/api/twarze/przypisz', { twarze: [t.id], osobaId, wzorzec: wzorzec() }), 'Przypisano');
     $$('.kandydat', panel).forEach(b => (b.onclick = () => przypisz(+b.dataset.osoba)));
     el('#pz-przypisz').onclick = () => { const v = el('#pz-osoba').value; if (v) przypisz(+v); else toast('Wybierz osobę z listy.', true); };
@@ -613,7 +651,7 @@ async function widokOsob() {
         <input id="szukaj" placeholder="Szukaj osoby…" value="${esc(stan.szukaj)}">
         <button id="dodaj-osobe" class="glowny">+ Dodaj osobę</button>
         <button id="import-csv">Import listy z CSV…</button>
-        <button id="import-wzorcow">Import wzorców z katalogu…</button>
+        ${rozpoznawanie() ? '<button id="import-wzorcow">Import wzorców z katalogu…</button>' : ''}
       </div>
       <div id="tabela-osob"></div>
     </section></div>`;
@@ -631,7 +669,7 @@ async function widokOsob() {
   $('#nowa-grupa').onkeydown = e => { if (e.key === 'Enter') $('#dodaj-grupe').click(); };
   $('#dodaj-osobe').onclick = () => edytujOsobe(null);
   $('#import-csv').onclick = importCsv;
-  $('#import-wzorcow').onclick = importWzorcow;
+  if (rozpoznawanie()) $('#import-wzorcow').onclick = importWzorcow;
   if (grupa) {
     $('#g-nazwa').onclick = () => {
       const nazwa = prompt('Nowa nazwa grupy:', grupa.nazwa);
@@ -668,15 +706,15 @@ function rysujTabeleOsob() {
     && (!szukaj || o.nazwa.toLocaleLowerCase('pl').includes(szukaj)));
   $('#tabela-osob').innerHTML = !lista.length
     ? `<p class="pusto">${stan.osoby.length ? 'Brak osób spełniających warunki.' : 'Baza osób jest pusta. Dodaj osoby ręcznie, zaimportuj listę z CSV albo katalog ze zdjęciami wzorcowymi.'}</p>`
-    : `<table class="tabela"><thead><tr><th>Osoba</th><th>Grupy</th><th>Zgoda</th><th>Wzorce twarzy</th><th>Zdjęcia</th></tr></thead><tbody>${lista.map(o => `
+    : `<table class="tabela"><thead><tr><th>Osoba</th><th>Grupy</th><th>Zgoda</th>${rozpoznawanie() ? '<th>Wzorce twarzy</th>' : ''}<th>Zdjęcia</th></tr></thead><tbody>${lista.map(o => `
       <tr data-id="${o.id}">
         <td><b>${esc(o.nazwa)}</b>${o.uwagi ? `<br><small>${esc(o.uwagi)}</small>` : ''}</td>
         <td>${o.grupy.map(g => `<span class="znacznik grupa-z">${esc(nazwaGrupy(g))}</span>`).join('')}</td>
         <td>${o.zgodaWazna ? `<span class="znacznik zielony">tak${o.zgodaDo ? ' do ' + o.zgodaDo : ''}</span>`
           : `<span class="znacznik czerwony">${o.zgoda ? 'wygasła ' + o.zgodaDo : 'brak'}</span>`}</td>
-        <td>${o.wzorce ? `${o.wzorce} <small>· najnowszy ${o.najnowszyWzorzec}</small>` : ''}
+        ${rozpoznawanie() ? `<td>${o.wzorce ? `${o.wzorce} <small>· najnowszy ${o.najnowszyWzorzec}</small>` : ''}
           ${o.wzorce === 0 ? '<span class="ostrzezenie">brak — osoba nie będzie rozpoznawana</span>' : ''}
-          ${o.staryWzorzec ? '<br><span class="ostrzezenie" title="Twarze, zwłaszcza dzieci, szybko się zmieniają — dodaj aktualne zdjęcie">⚠ stare wzorce</span>' : ''}</td>
+          ${o.staryWzorzec ? '<br><span class="ostrzezenie" title="Twarze, zwłaszcza dzieci, szybko się zmieniają — dodaj aktualne zdjęcie">⚠ stare wzorce</span>' : ''}</td>` : ''}
         <td>${o.zdjecia ? `<a href="#" class="pokaz-zdjecia" data-id="${o.id}">${o.zdjecia}</a>` : '0'}</td>
       </tr>`).join('')}</tbody></table>`;
   $$('#tabela-osob tbody tr').forEach(tr => (tr.onclick = e => {
@@ -696,8 +734,10 @@ function pokazZdjeciaOsoby(o) {
 function edytujOsobe(o) {
   const nowa = !o;
   const dane = o ?? { zgoda: false, grupy: stan.grupaWybrana !== null ? [stan.grupaWybrana] : [] };
+  const pokazWzorce = !nowa && rozpoznawanie();
   const m = otworzModal(`<div class="okno"><h2>${nowa ? 'Nowa osoba' : esc(o.nazwa)}</h2>${formularzOsoby('eo', dane)}
-    ${nowa ? '<p class="podpowiedz">Wzorce twarzy dodasz, przypisując tę osobę do twarzy na zdjęciu (z zaznaczonym „zapamiętaj jako wzorzec”).</p>'
+    ${!rozpoznawanie() ? ''
+      : nowa ? '<p class="podpowiedz">Wzorce twarzy dodasz, przypisując tę osobę do twarzy na zdjęciu (z zaznaczonym „zapamiętaj jako wzorzec”).</p>'
       : `<h3>Wzorce twarzy</h3><div id="eo-wzorce" class="wzorce"><small>ładowanie…</small></div>
          <p class="podpowiedz">Usuń wzorzec, który przedstawia kogoś innego — psułby rozpoznawanie.</p>`}
     <div class="stopka">${nowa ? '' : '<button id="eo-usun" class="niebezpieczny">Usuń osobę</button><button id="eo-zdjecia">Pokaż zdjęcia z tą osobą</button>'}
@@ -713,7 +753,7 @@ function edytujOsobe(o) {
       wzorce();
     })));
   }
-  if (!nowa) bezpiecznie(wzorce);
+  if (pokazWzorce) bezpiecznie(wzorce);
 
   $('#eo-anuluj', m).onclick = () => { m.remove(); widokOsob(); };
   $('#eo-zapisz', m).onclick = () => bezpiecznie(async () => {
@@ -784,30 +824,57 @@ function importWzorcow() {
 
 // ───────────── widok: ustawienia ─────────────
 
+// [klucz, nazwa, opis, krok (null = pole wyboru), dotyczy tylko trybu z rozpoznawaniem]
 const USTAWIENIA = [
-  ['progZgody', 'Próg „zielonego” (automatyczne odsłonięcie)', 'Minimalne podobieństwo do wzorców, żeby twarz osoby ze zgodą została odsłonięta bez potwierdzania. Wyżej = ostrożniej (więcej żółtych do sprawdzenia).', 0.01],
-  ['progRozpoznania', 'Próg rozpoznania', 'Od tej wartości twarz uznaje się za daną osobę (osoba bez zgody → czerwona; ze zgodą, ale poniżej progu „zielonego” → żółta z podpowiedzią). Zalecane dla modelu SFace: 0,363.', 0.01],
-  ['margines', 'Wymagana przewaga nad drugą osobą', 'Jeśli dwie osoby z bazy są podobne (rodzeństwo), zielone tylko przy takiej przewadze najlepszej nad drugą.', 0.01],
-  ['dwaWzorce', 'Zgodność z dwoma wzorcami', 'Zielone tylko, gdy twarz pasuje do co najmniej dwóch wzorców osoby (gdy osoba ma ich ≥ 2).', null],
-  ['progWykrywania', 'Czułość wykrywania twarzy', 'Pewność, od której coś uznaje się za twarz. Niżej = mniej przeoczonych twarzy, ale więcej fałszywych ramek. Działa przy ponownym przetworzeniu.', 0.05],
-  ['maleTwarze', 'Szukaj małych twarzy w tle', 'Dodatkowe przejście w wysokiej rozdzielczości — wolniej, ale mniej przeoczeń na zdjęciach grupowych.', null],
-  ['silaZamazania', 'Siła zamazania', 'Na ile pól w poziomie rozbić twarz przed rozmyciem. Mniej = mocniej (3–16).', 1],
-  ['miesiaceWzorca', 'Wiek wzorców (miesiące)', 'Po tylu miesiącach od najnowszego zdjęcia wzorcowego osoba dostaje ostrzeżenie „stare wzorce”.', 1],
+  ['progZgody', 'Próg „zielonego” (automatyczne odsłonięcie)', 'Minimalne podobieństwo do wzorców, żeby twarz osoby ze zgodą została odsłonięta bez potwierdzania. Wyżej = ostrożniej (więcej żółtych do sprawdzenia).', 0.01, true],
+  ['progRozpoznania', 'Próg rozpoznania', 'Od tej wartości twarz uznaje się za daną osobę (osoba bez zgody → czerwona; ze zgodą, ale poniżej progu „zielonego” → żółta z podpowiedzią). Zalecane dla modelu SFace: 0,363.', 0.01, true],
+  ['margines', 'Wymagana przewaga nad drugą osobą', 'Jeśli dwie osoby z bazy są podobne (rodzeństwo), zielone tylko przy takiej przewadze najlepszej nad drugą.', 0.01, true],
+  ['dwaWzorce', 'Zgodność z dwoma wzorcami', 'Zielone tylko, gdy twarz pasuje do co najmniej dwóch wzorców osoby (gdy osoba ma ich ≥ 2).', null, true],
+  ['progWykrywania', 'Czułość wykrywania twarzy', 'Pewność, od której coś uznaje się za twarz. Niżej = mniej przeoczonych twarzy, ale więcej fałszywych ramek. Działa przy ponownym przetworzeniu.', 0.05, false],
+  ['maleTwarze', 'Szukaj małych twarzy w tle', 'Dodatkowe przejście w wysokiej rozdzielczości — wolniej, ale mniej przeoczeń na zdjęciach grupowych.', null, false],
+  ['silaZamazania', 'Siła zamazania', 'Na ile pól w poziomie rozbić twarz przed rozmyciem. Mniej = mocniej (3–16).', 1, false],
+  ['miesiaceWzorca', 'Wiek wzorców (miesiące)', 'Po tylu miesiącach od najnowszego zdjęcia wzorcowego osoba dostaje ostrzeżenie „stare wzorce”.', 1, true],
 ];
 
 async function widokUstawien() {
   const [u, info] = await Promise.all([api('GET', '/api/ustawienia'), api('GET', '/api/info')]);
+  stan.ustawienia = u;
+  const bez = u.tryb === 'bezRozpoznawania';
   $('#widok').innerHTML = `<h2>Ustawienia</h2><div class="ustawienia">
-    ${USTAWIENIA.map(([k, nazwa, opis, krok]) => `<div class="ustawienie"><label for="u-${k}"><b>${nazwa}</b></label>
+    <fieldset class="tryby"><legend>Tryb pracy</legend>
+      <label class="tryb"><input type="radio" name="tryb" value="rozpoznawanie" ${bez ? '' : 'checked'}>
+        <span><b>Z rozpoznawaniem twarzy</b><br><small>Program porównuje twarze ze wzorcami osób i sam odsłania osoby ze zgodą.
+        Wektory cech twarzy (dane biometryczne) istnieją tylko w pamięci, póki program działa — na dysku leżą wycinki twarzy,
+        z których po starcie liczy się je od nowa. Porównywana jest każda twarz, także osób bez zgody.</small></span></label>
+      <label class="tryb"><input type="radio" name="tryb" value="bezRozpoznawania" ${bez ? 'checked' : ''}>
+        <span><b>Bez rozpoznawania — bez danych biometrycznych</b><br><small>Program tylko znajduje twarze i zamazuje wszystkie.
+        Osoby ze zgodą odsłania operator, przypisując je z listy. Bez wzorców, porównywania i grupowania podobnych twarzy.</small></span></label>
+    </fieldset>
+    ${USTAWIENIA.map(([k, nazwa, opis, krok, tylkoRozp]) => `<div class="ustawienie ${tylkoRozp ? 'tylko-rozp' : ''}"><label for="u-${k}"><b>${nazwa}</b></label>
       ${krok === null ? `<input type="checkbox" id="u-${k}" ${u[k] ? 'checked' : ''}>` : `<input type="number" id="u-${k}" step="${krok}" value="${u[k]}">`}
       <p>${opis}</p></div>`).join('')}
-    <div class="stopka"><small>Dane programu (baza osób i wzorców, miniatury): ${esc(info.katalogDanych)}</small><span class="odstep"></span>
+    <div class="stopka"><small>Dane programu (baza osób, wycinki twarzy, miniatury): ${esc(info.katalogDanych)}</small><span class="odstep"></span>
       <button id="u-zapisz" class="glowny">Zapisz</button></div></div>`;
+
+  const wybranyTryb = () => $('input[name=tryb]:checked').value;
+  const pokazPola = () => $$('.tylko-rozp').forEach(e => (e.hidden = wybranyTryb() === 'bezRozpoznawania'));
+  $$('input[name=tryb]').forEach(i => (i.onchange = pokazPola));
+  pokazPola();
+
   $('#u-zapisz').onclick = () => bezpiecznie(async () => {
-    const nowe = {};
+    const nowe = { tryb: wybranyTryb() };
     for (const [k, , , krok] of USTAWIENIA) nowe[k] = krok === null ? $('#u-' + k).checked : +$('#u-' + k).value;
+    const wylaczenie = nowe.tryb === 'bezRozpoznawania' && !bez, wlaczenie = nowe.tryb !== 'bezRozpoznawania' && bez;
+    if (wylaczenie) {
+      const wzorce = (await api('GET', '/api/osoby')).reduce((s, o) => s + o.wzorce, 0);
+      if (!confirm(`Przejście na tryb bez rozpoznawania usunie wszystkie wzorce twarzy (${wzorce}), wycinki twarzy przygotowane `
+        + 'do porównywania i automatyczne dopasowania. Osoby, grupy, zgody i ręczne decyzje zostają.\n\nKontynuować?')) return;
+    }
     await api('PUT', '/api/ustawienia', nowe);
-    toast('Zapisano ustawienia');
+    await zaladujUstawienia();
+    toast(wlaczenie ? 'Włączono rozpoznawanie — program przygotowuje twarze do porównywania. Wzorce osób trzeba dodać od nowa.'
+      : wylaczenie ? 'Tryb bez rozpoznawania — wzorce i wycinki twarzy usunięte' : 'Zapisano ustawienia');
+    if (wlaczenie) sprawdzZadanie();
     widokUstawien();
   });
 }
