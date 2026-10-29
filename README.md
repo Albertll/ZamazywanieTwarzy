@@ -163,8 +163,35 @@ i `--port 5077`. Zrzuty ekranu: `proba\zrzuty\`.
 
 ## Licencje modeli
 
-- YuNet `face_detection_yunet_2023mar.onnx` — OpenCV Zoo, **MIT**
-- SFace `face_recognition_sface_2021dec.onnx` — OpenCV Zoo, **Apache 2.0**
+- YuNet `face_detection_yunet_2023mar.onnx` — OpenCV Zoo, **MIT**.
+- SFace `face_recognition_sface_2021dec.onnx` — OpenCV Zoo, plik na licencji **Apache 2.0**, ale **dane treningowe nie są
+  udokumentowane**. Oryginalna praca o SFace używa zbiorów CASIA-WebFace, VGGFace2 i MS1MV2, które dopuszczają tylko
+  użycie badawcze. Pytanie o dane i użycie komercyjne jest otwarte w
+  [opencv_zoo #313](https://github.com/opencv/opencv_zoo/issues/313) (od lipca 2026, bez odpowiedzi opiekunów).
+  Przy użyciu komercyjnym albo instytucjonalnym to ryzyko trzeba ocenić samodzielnie.
 
-Obie pozwalają na użycie komercyjne (w przeciwieństwie do popularnych modeli InsightFace).
+Modele InsightFace (SCRFD, ArcFace) są wyraźnie lepsze, ale ich wagi wolno używać tylko do **niekomercyjnych badań** —
+także „niekomercyjny” projekt praktyczny (np. szkoła) wymaga licencji od InsightFace. Program ich nie zawiera.
 Teksty licencji i źródła: `src\ZamazywanieTwarzy\modele\` (kopiowane też do wersji opublikowanej).
+
+## Porównanie modeli
+
+Narzędzie `proba\porownanie` mierzy modele na zdjęciach testowych (`dotnet run --project proba\porownanie -c Release`,
+modele spoza programu w `proba\modele-porownanie`). Wyniki z 29.10.2026 — szczegóły w
+[`proba/porownanie/WYNIKI.md`](proba/porownanie/WYNIKI.md):
+
+- **Rozpoznawanie** (27 wystąpień 3 dorosłych osób publicznych): SFace i ArcFace R50 (InsightFace) wskazały właściwą osobę
+  we wszystkich 27 przypadkach. ArcFace ma jednak dużo większy zapas bezpieczeństwa: najsłabsza właściwa osoba 0,42 przy
+  najwyższym wyniku osoby obcej 0,25, podczas gdy w SFace 0,434 wobec 0,427 (rozdzielenie d′ 6,3 wobec 4,9). Kosztem jest
+  ok. 4× dłuższe liczenie. Przy dzieciach ten zapas miałby większe znaczenie.
+- **Wykrywanie:** SCRFD-10G (InsightFace) znalazł kilka prawdziwych twarzy, które YuNet pominął (częściowo zasłonięte,
+  ucięte krawędzią kadru, rozmyte w tłumie), i nie dał ok. 35 fałszywych ramek YuNet (tyły głów, dłonie, przedmioty) —
+  ale też pominął dwie twarze, które YuNet znalazł, i jest ok. 4,5× wolniejszy.
+- **Obniżenie progu YuNet z 0,6 do 0,5** (bez zmiany modelu): +40 ramek, wśród nich kilka wyraźnych twarzy, które przy 0,6
+  zostałyby odsłonięte (m.in. twarz en face 51 px), kilkanaście rozmytych twarzy z tłumu i ok. 20 fałszywych ramek
+  (nieszkodliwych — kończą się zbędnym zamazaniem).
+
+Zbiór jest mały (dorośli, zdjęcia z mediów), więc wyniki są orientacyjne. AuraFace (Apache 2.0, wytrenowany na danych
+dopuszczonych komercyjnie) narzędzie dołączy samo, gdy plik `glintr100.onnx` z
+[fal/AuraFace-v1](https://huggingface.co/fal/AuraFace-v1) trafi do `proba\modele-porownanie\auraface_glintr100.onnx`.
+Uwaga: pozostałe pliki w tamtym repozytorium (m.in. `scrfd_10g_bnkps.onnx`) są bajt w bajt plikami InsightFace.

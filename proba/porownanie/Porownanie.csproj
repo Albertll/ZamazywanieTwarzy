@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Porównanie modeli na zdjęciach testowych — narzędzie pomiarowe, nie część programu.
+       Modele InsightFace (SCRFD, ArcFace) są tu tylko punktem odniesienia: ich licencja dopuszcza wyłącznie
+       niekomercyjne badania, więc leżą poza repozytorium (proba\modele-porownanie, .gitignore). -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>ZamazywanieTwarzy</RootNamespace>
+    <!-- Modele.cs z programu: pola wypełniane tylko w programie -->
+    <NoWarn>CS0649</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.31.1" />
+    <PackageReference Include="SkiaSharp" Version="4.154.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- te same pliki co w programie: wczytywanie zdjęć, YuNet, SFace z wyrównaniem twarzy -->
+    <Compile Include="..\..\src\ZamazywanieTwarzy\Obraz.cs;..\..\src\ZamazywanieTwarzy\Detektor.cs;..\..\src\ZamazywanieTwarzy\Rozpoznawanie.cs;..\..\src\ZamazywanieTwarzy\Modele.cs" LinkBase="wspolne" />
+  </ItemGroup>
+
+</Project>

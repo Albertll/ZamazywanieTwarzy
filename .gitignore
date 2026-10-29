@@ -15,3 +15,7 @@ wynik*/
 proba/zrzuty/
 proba/pobierz-test/
 proba/pw/node_modules/
+
+# modele spoza programu (InsightFace: tylko niekomercyjne badania — nie rozpowszechniamy) i arkusze z twarzami
+proba/modele-porownanie/
+proba/porownanie/wyniki/
