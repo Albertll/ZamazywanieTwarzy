@@ -1,0 +1,59 @@
+# Buduje wersję „jeden plik, bez instalowania .NET” dla Windows x64.
+# Push na main i pull request — build + ZIP jako artefakt przebiegu.
+# Tag v* (np. v0.1) — dodatkowo wydanie (Release) z ZIP-em pod stałym linkiem:
+#   https://github.com/Albertll/ZamazywanieTwarzy/releases/latest/download/ZamazywanieTwarzy-win-x64.zip
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    # win-x64 da się opublikować z Linuksa — runner Ubuntu startuje szybciej niż Windows
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Wersja
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then echo "WERSJA=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+          else echo "WERSJA=0.0.0-ci.${GITHUB_RUN_NUMBER}" >> "$GITHUB_ENV"; fi
+
+      - name: Publikacja
+        run: >
+          dotnet publish src/ZamazywanieTwarzy -c Release -r win-x64 --self-contained
+          -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true
+          -p:EnableCompressionInSingleFile=true -p:DebugType=none -p:Version=${WERSJA}
+          -o ZamazywanieTwarzy
+
+      - name: ZIP
+        run: |
+          cp README.md ZamazywanieTwarzy/
+          zip -r -9 ZamazywanieTwarzy-win-x64.zip ZamazywanieTwarzy
+          ls -l ZamazywanieTwarzy ZamazywanieTwarzy-win-x64.zip
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ZamazywanieTwarzy-win-x64
+          path: ZamazywanieTwarzy/
+
+      - name: Wydanie
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh release create "$GITHUB_REF_NAME" ZamazywanieTwarzy-win-x64.zip
+          --title "Zamazywanie twarzy $GITHUB_REF_NAME" --generate-notes
+          --notes "Rozpakuj ZIP i uruchom ZamazywanieTwarzy.exe (Windows 10/11 x64, bez instalowania .NET).
+          Plik nie jest podpisany — Windows SmartScreen może ostrzec przy pierwszym uruchomieniu („Więcej informacji” → „Uruchom mimo to”)."

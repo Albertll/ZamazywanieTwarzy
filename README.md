@@ -4,6 +4,17 @@ Lokalna aplikacja, która rozpoznaje na zdjęciach osoby z bazy i **zamazuje wsz
 (tryb „dozwolonych twarzy”). Działa w całości na komputerze, bez internetu i bez karty graficznej.
 Interfejs otwiera się w przeglądarce, a pod spodem działa lokalny serwer (.NET 10).
 
+## Pobranie
+
+Najnowsza wersja dla Windows 10/11 x64 (bez instalowania .NET):
+**[ZamazywanieTwarzy-win-x64.zip](https://github.com/Albertll/ZamazywanieTwarzy/releases/latest/download/ZamazywanieTwarzy-win-x64.zip)**
+— rozpakuj i uruchom `ZamazywanieTwarzy.exe`. Plik nie jest podpisany, więc Windows SmartScreen może ostrzec przy
+pierwszym uruchomieniu („Więcej informacji” → „Uruchom mimo to”).
+
+Wydania buduje GitHub Actions (`.github/workflows/build.yml`): każdy push na `main` sprawdza build i zostawia ZIP
+jako artefakt przebiegu, a wypchnięcie taga `v*` (np. `git tag v0.2 && git push origin v0.2`) tworzy nowe wydanie —
+link powyżej zawsze wskazuje najnowsze.
+
 ## Uruchomienie
 
 Z repozytorium: `dotnet run --project src\ZamazywanieTwarzy` (wymaga .NET 10 SDK) albo zbuduj wersję
