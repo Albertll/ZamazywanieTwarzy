@@ -4,6 +4,24 @@ Lokalna aplikacja, która rozpoznaje na zdjęciach osoby z bazy i **zamazuje wsz
 (tryb „dozwolonych twarzy”). Działa w całości na komputerze, bez internetu i bez karty graficznej.
 Interfejs otwiera się w przeglądarce, a pod spodem działa lokalny serwer (.NET 10).
 
+## Jak to wygląda
+
+Zielone ramki — osoby ze zgodą (zostają), żółte — nierozpoznane (zostaną zamazane). Pod ramką imię rozpoznanej osoby,
+ze znakiem „?”, gdy to tylko podpowiedź do potwierdzenia:
+
+![Podgląd zdjęcia z ramkami i podpisami osób](docs/podglad-ramki.jpg)
+
+„Podgląd po zamazaniu” — tak będzie wyglądać zapisana kopia (lista twarzy po prawej to widok dla obsługującego program):
+
+![Ten sam podgląd po zamazaniu](docs/podglad-zamazany.jpg)
+
+Siatka przetworzonych zdjęć z liczbą twarzy w każdym kolorze:
+
+![Siatka przetworzonych zdjęć](docs/siatka.jpg)
+
+<sub>Zdjęcia: Biały Dom, Departament Stanu, NASA i inne — domena publiczna, Wikimedia Commons (źródła w
+`testdane/ZRODLA.md`). Wzorce osób ze zgodą w tym przykładzie: B. Obama, J. Biden, H. Clinton.</sub>
+
 ## Pobranie
 
 Najnowsza wersja dla Windows 10/11 x64 (bez instalowania .NET):
